@@ -22,8 +22,20 @@ export interface Change {
   notice: NewEvent<ViewMessageV1>;
 }
 
-export const titleOf = (text: string): string =>
-  Array.from(text.trim()).slice(0, 80).join("").trimEnd();
+const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
+const unsafe = /[\p{Cc}\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
+const maxTitleLength = 200;
+
+export function titleOf(text: string): string {
+  let title = "";
+  let count = 0;
+  for (const { segment } of graphemes.segment(text.replace(unsafe, " ").trim())) {
+    if (count === 80 || title.length + segment.length > maxTitleLength) break;
+    title += segment;
+    count += 1;
+  }
+  return title.trimEnd();
+}
 
 export const toItem = (doc: TaskDoc): TaskListItemV1 => ({
   taskId: doc._id,

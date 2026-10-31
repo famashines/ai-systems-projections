@@ -88,3 +88,18 @@ test("the title is the first 80 characters of the trimmed text, trimmed", () => 
   assert.equal(titleOf("a".repeat(79) + " b"), "a".repeat(79));
   assert.equal(titleOf("😀".repeat(81)), "😀".repeat(80));
 });
+
+test("the title cuts by graphemes and replaces control and bidi characters", () => {
+  const family = "👨‍👩‍👧";
+  assert.equal(titleOf("a".repeat(79) + family + "b"), "a".repeat(79) + family);
+  assert.equal(titleOf("\u001b[31mred\u001b[0m"), "[31mred [0m");
+  assert.equal(titleOf("line one\r\nline two\u2028three"), "line one  line two three");
+  assert.equal(titleOf("\u202Etxt.exe\u202C name"), "txt.exe  name");
+  assert.equal(titleOf("\t\u200Fplan\u0000"), "plan");
+});
+
+test("the title has at most 200 UTF-16 units, for TaskListItemV1", () => {
+  const title = titleOf("👨‍👩‍👧".repeat(80));
+  assert.equal(title, "👨‍👩‍👧".repeat(25));
+  assert.ok(title.length <= 200);
+});
