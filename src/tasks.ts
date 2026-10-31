@@ -23,18 +23,32 @@ export interface Change {
 }
 
 const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
-const unsafe = /[\p{Cc}\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
+const unsafe = /[\p{Cc}\p{Cs}\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
 const maxTitleLength = 200;
+export const noTitle = "(no title)";
+
+function firstUnits(segment: string): string {
+  let part = "";
+  for (const codePoint of segment) {
+    if (part.length + codePoint.length > maxTitleLength) break;
+    part += codePoint;
+  }
+  return part;
+}
 
 export function titleOf(text: string): string {
   let title = "";
   let count = 0;
   for (const { segment } of graphemes.segment(text.replace(unsafe, " ").trim())) {
-    if (count === 80 || title.length + segment.length > maxTitleLength) break;
+    if (count === 80) break;
+    if (title.length + segment.length > maxTitleLength) {
+      if (count === 0) title = firstUnits(segment);
+      break;
+    }
     title += segment;
     count += 1;
   }
-  return title.trimEnd();
+  return title.trimEnd() || noTitle;
 }
 
 export const toItem = (doc: TaskDoc): TaskListItemV1 => ({

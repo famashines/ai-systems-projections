@@ -6,7 +6,7 @@ import {
   ViewMessageV1,
   type RegisteredEvent,
 } from "@famashines/ai-systems-contracts";
-import { project, titleOf, toItem, type TaskDoc } from "./tasks.ts";
+import { noTitle, project, titleOf, toItem, type TaskDoc } from "./tasks.ts";
 
 const taskId = "0b9d3c4e-6f1a-4c2b-9d8e-7a6b5c4d3e2f";
 const commandId = "1c8e2b3d-5a4f-4e6d-8c7b-9a0b1c2d3e4f";
@@ -102,4 +102,31 @@ test("the title has at most 200 UTF-16 units, for TaskListItemV1", () => {
   const title = titleOf("👨‍👩‍👧".repeat(80));
   assert.equal(title, "👨‍👩‍👧".repeat(25));
   assert.ok(title.length <= 200);
+});
+
+test("a text with no visible title gives the fixed title", () => {
+  for (const text of ["\u0007", "\u202E", "\u200E\u200F", "\u2066\u2069", "\uD800", "\uDC00\t"]) {
+    assert.equal(titleOf(text), noTitle, JSON.stringify(text));
+  }
+});
+
+test("a first grapheme above 200 UTF-16 units is cut by code points", () => {
+  const title = titleOf("e" + "\u0301".repeat(300) + " rest");
+  assert.equal(title, "e" + "\u0301".repeat(199));
+  assert.equal(title.length, 200);
+});
+
+test("a lone surrogate becomes a space", () => {
+  assert.equal(titleOf("a\uD800b"), "a b");
+});
+
+test("each title is a valid TaskListItemV1 title", () => {
+  const texts = ["\u0007", "\u202E", "e" + "\u0301".repeat(300), "👨‍👩‍👧".repeat(80), "Plan"];
+  for (const text of texts) {
+    assert.equal(
+      TaskListItemV1.shape.title.safeParse(titleOf(text)).success,
+      true,
+      JSON.stringify(text),
+    );
+  }
 });
