@@ -19,7 +19,7 @@
     "test:integration": "node --test --test-timeout=300000 'src/**/*.integration.ts'"
   },
   "dependencies": {
-    "@famashines/ai-systems-contracts": "git+file:///tmp/claude-1000/-home-yahya-Documents-famashines/f5f0a047-a9ea-4f91-8857-1625439b715f/scratchpad/m1-07-contracts#feat/view-notice",
+    "@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#6be92deef74c82368819c1d909bca508c37f03c6",
     "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#v0.1.0",
     "mongodb": "7.8.0",
     "zod": "4.6.7"
@@ -44,6 +44,7 @@
     "github:famashines/ai-systems-kit#58eaddff3138486f167cab5023304d58470960db": true,
     "protobufjs": false,
     "ssh2": false,
-    "cpu-features": false
+    "cpu-features": false,
+    "github:famashines/ai-systems-contracts#6be92deef74c82368819c1d909bca508c37f03c6": true
   }
 }
