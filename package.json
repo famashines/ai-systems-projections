@@ -1,0 +1,49 @@
+{
+  "name": "ai-systems-projections",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read models of ai-systems and their VIEWS notices",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "rebuild": "node src/rebuild-main.ts",
+    "check": "node node_modules/typescript-7/bin/tsc --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "node --test --experimental-test-coverage --test-coverage-lines=70 --test-coverage-include='src/**/*.ts' --test-coverage-exclude='src/**/*.test.ts' --test-coverage-exclude='src/**/*.io.ts' --test-coverage-exclude='src/*main.ts' 'src/**/*.test.ts'",
+    "verify": "npm run check && npm run lint && npm test",
+    "test:integration": "node --test --test-timeout=300000 'src/**/*.integration.ts'"
+  },
+  "dependencies": {
+    "@famashines/ai-systems-contracts": "git+file:///tmp/claude-1000/-home-yahya-Documents-famashines/f5f0a047-a9ea-4f91-8857-1625439b715f/scratchpad/m1-07-contracts#feat/view-notice",
+    "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#v0.1.0",
+    "mongodb": "7.8.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/transport-node": "3.4.0",
+    "@types/node": "26.6.6",
+    "eslint": "10.14.0",
+    "pino": "10.4.0",
+    "prettier": "3.9.10",
+    "testcontainers": "12.2.1",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "typescript-7": "npm:typescript@7.0.2",
+    "typescript-eslint": "8.72.1"
+  },
+  "overrides": {
+    "@typescript/old": "npm:typescript@6.0.3"
+  },
+  "allowScripts": {
+    "github:famashines/ai-systems-contracts#09f6c8c5385e90dd96cdc81fbd5c8c44d7e92257": true,
+    "github:famashines/ai-systems-kit#58eaddff3138486f167cab5023304d58470960db": true,
+    "protobufjs": false,
+    "ssh2": false,
+    "cpu-features": false
+  }
+}
