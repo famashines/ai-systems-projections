@@ -56,8 +56,9 @@ jobs:
 
       - name: Start with a read-only root file system
         run: |
-          docker run --rm --read-only ai-systems-projections:ci node -e "process.exit(process.getuid() === 1000 ? 0 : 1)"
-          docker run --rm --read-only ai-systems-projections:ci node src/main.ts 2>&1 | grep -q ConfigError
+          docker run --rm --read-only --entrypoint node ai-systems-projections:ci -e "process.exit(process.getuid() === 1000 ? 0 : 1)"
+          docker run --rm --read-only ai-systems-projections:ci 2>&1 | grep -q ConfigError
+          ! docker run --rm --entrypoint sh ai-systems-projections:ci -c "command -v npm || command -v npx"
 
   integration:
     runs-on: ubuntu-22.04
