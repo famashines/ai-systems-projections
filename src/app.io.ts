@@ -1,3 +1,4 @@
+import { parseEvent } from "@famashines/ai-systems-contracts";
 import type { CloseHook, ReadinessCheck, Route } from "@famashines/ai-systems-kit/http";
 import { startConsumer, startRelay, type Nats } from "@famashines/ai-systems-kit/messaging";
 import type { Db } from "mongodb";
@@ -19,6 +20,7 @@ export function startProjections(db: Db, nats: Nats): Projections {
     stream: "ORCHESTRATION",
     filter: "orchestration.>",
     ordered: true,
+    parse: parseEvent,
     handler: (event, { markProcessed }) => apply(event, markProcessed),
   });
   const relay = startRelay({ store, nats, streams: ["VIEWS"] });
