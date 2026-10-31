@@ -27,7 +27,7 @@ Database `projections` (`MONGODB_DATABASE`), one document for each task:
 | Field       | Value                                                        |
 | ----------- | ------------------------------------------------------------ |
 | `_id`       | the task id                                                  |
-| `title`     | the text, trimmed, the first 80 characters, trimmed again    |
+| `title`     | the cleaned text, at most 80 graphemes, see below            |
 | `status`    | `submitted` (M1)                                             |
 | `createdAt` | `occurredAt` of the first event (a MongoDB date)             |
 | `updatedAt` | `occurredAt` of the last event that changed the document     |
@@ -40,6 +40,14 @@ ignores an event with a `version` that is not higher than `asOf`. In M1
 each source stream gives one document, so the document holds the
 checkpoint and there is no `checkpoints` collection yet (ARCHITECTURE 7).
 
+Title: control characters (`\p{Cc}`, so also `\r`, `\n`, tab and ESC),
+the line and paragraph separators (U+2028, U+2029) and the bidi controls
+(U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) become a
+space. Then the text is trimmed, cut after 80 graphemes
+(`Intl.Segmenter`, so an emoji with ZWJ stays whole) or before it is
+longer than 200 UTF-16 units (the limit of `TaskListItemV1.title`), and
+trimmed again.
+
 The pure function `project(current, event)` in `src/tasks.ts` gives the
 new document and its notice. The live consumer and the rebuild use it.
 
@@ -49,7 +57,7 @@ The notice outbox is the kit event store in the same database:
 collections `events`, `counters` and `commands` (the kit names, in place of
 `outbox_views` in ARCHITECTURE 7). The kit relay publishes each notice to
 the subject in its `type`, with `Nats-Msg-Id` = the notice `eventId`. A
-message is a `ViewMessageV1` of contracts v0.1.1:
+message is a `ViewMessageV1` of contracts v0.2.0:
 
 ```
 { eventId, type: "view.tasks", schemaVersion: 1,
@@ -66,14 +74,16 @@ gives one to `task:<id>`.
 
 ## Query API (internal)
 
-`GET /internal/tasks?limit=&before=` gives `TaskListResultV1`:
+`GET /internal/tasks?limit=&before=&beforeId=` gives `TaskListResultV1`:
 
 - `items`: newest first (`createdAt`, then `_id`, both descending).
 - `limit`: 1 to 100, default 50.
-- `before`: an ISO 8601 UTC time. The page has tasks with `createdAt`
-  before it. Give the `createdAt` of the last item to get the next page.
-  Limit: two tasks with the same `createdAt` millisecond at a page border
-  can make the next page skip one of them.
+- `before` and `beforeId`: the cursor. Give the `createdAt` and the
+  `taskId` of the last item to get the next page. The page has the tasks
+  that come after that item in the order, also tasks with the same
+  `createdAt`. `before` alone gives the tasks with `createdAt` before it
+  (it can skip a task with the same millisecond). `beforeId` without
+  `before` gives 400.
 - `headSeq`: the last sequence of `VIEWS` (`$JS.API.STREAM.INFO.VIEWS`),
   read before the documents. A change after the read has a higher
   sequence. If NATS does not answer: 503.
@@ -82,38 +92,51 @@ Also `/health`, `/ready` (MongoDB, NATS, consumer, relay) and `/metrics`.
 
 ## Rebuild
 
-`npm run rebuild` (function `rebuild` in `src/rebuild.io.ts`):
+`npm run rebuild` (function `rebuild` in `src/rebuild.io.ts`; in the image
+`--entrypoint node` with the argument `src/rebuild-main.ts`):
 
-1. Drops `tasks`, `events` (the notices), `counters` and `processed`, and
-   makes their indexes and the position counter again.
-2. Reads all events from `GET <ORCHESTRATION_URL>/internal/events?afterPosition=<n>&limit=100`
-   page by page, until a page is empty.
-3. Applies each event with the same `project` as the live consumer, and
-   writes the documents and the notices again.
+```
+check the durable "projections": num_waiting > 0 ?  -- yes --> refuse, exit 1
+wait about 6 s, check again                          -- yes --> refuse, exit 1
+write the marker { _id: "running" } in "rebuild"
+drop tasks, events (the notices), counters, processed; make indexes again
+GET <ORCHESTRATION_URL>/internal/events?afterPosition=<n>&limit=100, page by page
+  each event: parseEvent --> fail: skip and count (type in the log)
+                         --> ok:   same project() and transaction as live
+remove the marker
+```
+
+- A running service always has a waiting pull on its durable consumer, so
+  the check finds a pod that was not stopped. The check needs the NATS env
+  vars (`CONSUMER.INFO` is in the grants).
+- While the marker exists, the service refuses to start: it logs "a rebuild
+  runs or did not end" and exits with 1. If the rebuild stops in the
+  middle, the marker stays. Run the rebuild again to the end; it starts
+  from nothing each time.
+- An event that does not parse is skipped and counted, as the live
+  consumer sends it to the DLQ. The log gives the count and the types.
+- The replay API of orchestration (orchestration PR #1): `limit` is 100 by
+  default and 1000 at most. The answer is JSON
+  `{ "events": [ <EventEnvelopeV1 with "position">, ... ] }` in
+  `position` order. The next page starts after the last `position`; an
+  empty list is the end.
 
 Decision: a rebuild writes the notices again, with the same `rev` values,
 because the same events give the same documents. The relay publishes them
-when the service starts again. The app has these revs already and drops
-the notices (ARCHITECTURE 10.2), so no screen changes. A notice that was
-not published before the rebuild is published now, so no change is lost.
-The cost is one burst of notices on `VIEWS` for each rebuild.
+when the service starts again, so `VIEWS` stores them a second time. The
+stream limits keep this bounded (256 MiB, 7 days, discard old); a client
+with a `lastSeq` that the stream does not keep any more gets `resync`.
+Clients already have these revs and drop the notices (ARCHITECTURE 10.2).
+A notice that was not published before the rebuild is published now, so
+no change is lost.
 
-Rules:
+After a rebuild that fixes a projection bug, the new documents can differ
+but have the same `rev`. Open clients drop the notices and keep the wrong
+data until they load a snapshot again (a reconnect with `resync`, or a
+new start of the app).
 
-- Stop the service first (scale the Deployment to 0). The live consumer
-  must not write while the rebuild runs. Start it again after the rebuild.
-  The durable consumer continues from its last ack; an event that comes
-  again is ignored by `asOf`.
-- If the rebuild stops in the middle, run it again. It starts from
-  nothing each time.
-- Env vars: `MONGODB_URI`, `MONGODB_DATABASE`, `ORCHESTRATION_URL`,
-  `LOG_LEVEL`. No NATS.
-
-The replay API of orchestration (orchestration PR #1): `limit` is 100 by
-default and 1000 at most. The answer is JSON
-`{ "events": [ <EventEnvelopeV1 with "position">, ... ] }` in `position`
-order. The next page starts after the last `position`; an empty list is
-the end. projections checks each event with `parseEvent` of contracts.
+Start the service again after the rebuild. The durable consumer continues
+from its last ack; an event that comes again is ignored by `asOf`.
 
 ## Config
 
@@ -124,15 +147,16 @@ the end. projections checks each event with `parseEvent` of contracts.
 | `NATS_SERVERS`      | required      | comma-separated NATS URLs                                             |
 | `NATS_USER`         | required      | `ai-systems-projections`                                              |
 | `NATS_PASSWORD`     | required      | its password                                                          |
-| `ORCHESTRATION_URL` | required      | base URL of orchestration (rebuild only)                              |
+| `ORCHESTRATION_URL` | required      | base URL of orchestration (the rebuild uses it)                       |
 | `PORT`              | `8080`        | HTTP port                                                             |
 | `LOG_LEVEL`         | `info`        | pino level                                                            |
 | `RELEASE`           | `local`       | release name in logs and traces                                       |
 | `OTEL_*`            | none          | OpenTelemetry SDK settings, for example `OTEL_EXPORTER_OTLP_ENDPOINT` |
 
-The kit service name is fixed to `projections`: the durable consumer is
-`projections` and the inbox prefix is `_INBOX_projections` (ADR 0023). The
-NATS user `ai-systems-projections` has only these grants (gitops).
+The service and the rebuild use the same env vars. The kit service name is
+fixed to `projections`: the durable consumer is `projections` and the
+inbox prefix is `_INBOX_projections` (ADR 0023). The NATS user
+`ai-systems-projections` has only these grants (gitops).
 
 ## Install
 
@@ -140,25 +164,33 @@ The kit and contracts come from git tags (see the kit README for
 `allowScripts`):
 
 ```json
-"@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.1.1",
+"@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.2.0",
 "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#v0.1.0"
 ```
 
-The kit has its own copy of contracts v0.1.0. One `zod` and one `mongodb`
-copy are shared.
+npm uses this one contracts copy also for the kit. One `zod` and one
+`mongodb` copy are shared.
 
 ## Image
 
-`Dockerfile`: Node 26 slim by digest, `npm ci --omit=dev`, the TypeScript
-source runs with Node type stripping (`node src/main.ts`), uid 1000. Run
-it with a read-only root file system; it writes no files.
+`Dockerfile`: Node 26 slim by digest, `npm ci --omit=dev --omit=optional`
+in a build stage, no npm or npx in the runtime stage, uid 1000,
+`ENTRYPOINT ["node", "src/main.ts"]` (Node type stripping). Run it with a
+read-only root file system; it writes no files. node is PID 1, so
+`main.ts` exits with 143 on SIGTERM or SIGINT while it connects; after the
+start the kit shutdown takes over.
 
 ## Known limits
 
 - An event type that is not in the installed contracts goes to the DLQ
   (kit default). Release the contracts and projections before a producer
   sends a new type.
-- The `before` cursor tie, see the query API.
+- `commandId` in a notice is the `causationId` of the source event. That
+  is correct only for events that a command caused. Look at it again in
+  M3, when process managers cause events.
+- The `asOf` rule cannot see a gap: if a version went to the DLQ, a later
+  version is applied and the gap stays. From M2, with streams of more than
+  one event, check `version === asOf + 1`.
 
 ## Commands
 

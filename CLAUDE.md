@@ -21,9 +21,9 @@ Rules for all ai-systems repos: `ai-systems-docs/CLAUDE.md`
 ```
 src/tasks.ts          project(current, event): the tasks document and its notice (no I/O)
 src/query.ts          GET /internal/tasks route, with ports
-src/config.ts         env schemas of the service and the rebuild
+src/config.ts         env schema of the service and the rebuild
 src/projector.io.ts   MongoDB writes in one transaction, notice store, list, headSeq, migrations
-src/rebuild.io.ts     rebuild and the replay API client
+src/rebuild.io.ts     rebuild, its guard and marker, the replay API client
 src/app.io.ts         consumer, relay and routes together
 src/main.ts           service wiring
 src/rebuild-main.ts   rebuild command
