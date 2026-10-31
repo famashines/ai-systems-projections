@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Writable } from "node:stream";
@@ -24,7 +25,13 @@ import { jetstream, jetstreamManager, type JetStreamManager } from "@nats-io/jet
 import { pino } from "pino";
 import { startProjections, type Projections } from "./app.io.ts";
 import { migrations, tasksOf } from "./projector.io.ts";
-import { rebuild, replayFrom } from "./rebuild.io.ts";
+import {
+  assertServiceStopped,
+  rebuild,
+  rebuildRunning,
+  replayFrom,
+  type FetchPage,
+} from "./rebuild.io.ts";
 import type { TaskDoc } from "./tasks.ts";
 
 const streams = ["ORCHESTRATION", "CONVERSATION", "LLM", "BUDGET", "AGENTS", "PROMPTS"];
@@ -144,7 +151,13 @@ after(async () => {
 });
 
 const submitted = (
-  overrides: { taskId?: string; version?: number; text?: string; eventId?: string } = {},
+  overrides: {
+    taskId?: string;
+    version?: number;
+    text?: string;
+    eventId?: string;
+    occurredAt?: string;
+  } = {},
 ): RegisteredEvent => {
   const taskId = overrides.taskId ?? randomUUID();
   return parseEvent({
@@ -153,7 +166,7 @@ const submitted = (
     schemaVersion: 1,
     streamId: `task-${taskId}`,
     version: overrides.version ?? 1,
-    occurredAt: new Date().toISOString(),
+    occurredAt: overrides.occurredAt ?? new Date().toISOString(),
     correlationId: taskId,
     causationId: randomUUID(),
     actor: { kind: "owner", id: "owner" },
@@ -284,38 +297,95 @@ describe("projections", () => {
     );
   });
 
-  test("the query API lists tasks newest first with headSeq from VIEWS", async () => {
+  test("the query API lists tasks newest first, pages through ties, with headSeq", async () => {
     assert.ok(app);
+    const base = app.base;
+    const list = async (query: string) =>
+      TaskListResultV1.parse(await (await fetch(`${base}/internal/tasks?${query}`)).json());
     const { state } = await manager.streams.info("VIEWS");
-    const all = TaskListResultV1.parse(await (await fetch(`${app.base}/internal/tasks`)).json());
-    assert.equal(all.headSeq, state.last_seq);
-    assert.equal(all.items.length, 3);
+    const first = await list("");
+    assert.equal(first.headSeq, state.last_seq);
+    assert.equal(first.items.length, 3);
+    const tie = new Date(Date.parse(first.items[0]?.createdAt ?? "") + 60_000).toISOString();
+    const older = new Date(Date.parse(tie) - 1).toISOString();
+    for (const occurredAt of [tie, tie, tie, older]) await publishNew(submitted({ occurredAt }));
+    await waitFor(async () => (await list("")).items.length === 7, 30_000, 100);
+    const all = await list("limit=100");
     const times = all.items.map((item) => item.createdAt);
     assert.deepEqual(times, times.toSorted().reverse());
-    const page = TaskListResultV1.parse(
-      await (await fetch(`${app.base}/internal/tasks?limit=1&before=${times[0] ?? ""}`)).json(),
-    );
+    const seen: string[] = [];
+    let cursor = "";
+    for (;;) {
+      const page = await list(`limit=2${cursor}`);
+      seen.push(...page.items.map((item) => item.taskId));
+      const last = page.items.at(-1);
+      if (!last) break;
+      cursor = `&before=${last.createdAt}&beforeId=${last.taskId}`;
+    }
     assert.deepEqual(
-      page.items.map((item) => item.taskId),
-      [all.items[1]?.taskId],
+      seen,
+      all.items.map((item) => item.taskId),
     );
-    assert.equal((await fetch(`${app.base}/internal/tasks?limit=0`)).status, 400);
+    const onlyBefore = await list(`limit=100&before=${tie}`);
+    assert.equal(onlyBefore.items.length, 4);
+    assert.equal((await fetch(`${base}/internal/tasks?limit=0`)).status, 400);
   });
 
-  test("a rebuild from the replay API gives the same read model and notices with the same revs", async () => {
+  let live: TaskDoc[] = [];
+  let livePayloads: ViewMessageV1["payload"][] = [];
+  let viewsBefore = 0;
+  const byDoc = (a: { docId: string; rev: number }, b: { docId: string; rev: number }) =>
+    a.docId.localeCompare(b.docId) || a.rev - b.rev;
+
+  test("the rebuild refuses to run while the service pulls from its consumer", async () => {
     await waitFor(drained, 30_000, 100);
-    const live = await allDocs();
-    const liveRevs = new Map((await views()).map(({ message: m }) => [m.eventId, m.payload]));
-    const viewsBefore = (await views()).length;
+    live = await allDocs();
+    livePayloads = (await views()).map(({ message }) => message.payload);
+    viewsBefore = livePayloads.length;
+    await assert.rejects(assertServiceStopped(service, 100), /waiting pulls/);
     await stopApp();
+    const waiting = async () =>
+      (await manager.consumers.info("ORCHESTRATION", "projections")).num_waiting;
+    await waitFor(async () => (await waiting()) === 0, 30_000, 100);
+    await assertServiceStopped(service, 100);
+  });
+
+  test("a rebuild that stops leaves its marker, and the service refuses to start", async () => {
+    const failing: FetchPage = () => Promise.reject(new Error("replay API down"));
+    await assert.rejects(rebuild(database.db, failing), /replay API down/);
+    assert.equal(await rebuildRunning(database.db), true);
+    const child = spawn(process.execPath, ["src/main.ts"], {
+      env: {
+        PATH: process.env.PATH,
+        MONGODB_URI: mongo.url,
+        NATS_SERVERS: natsServer.url,
+        NATS_USER: "ai-systems-projections",
+        NATS_PASSWORD: "projections",
+        ORCHESTRATION_URL: "http://127.0.0.1:1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.on("data", (chunk: Buffer) => (output += chunk.toString()));
+    }
+    const code = await new Promise((resolve) => child.on("exit", resolve));
+    assert.equal(code, 1);
+    assert.match(output, /a rebuild runs or did not end/);
+    assert.doesNotMatch(output, /connecting to NATS/);
+  });
+
+  test("a rebuild from the replay API gives the same read model, skips bad events, and writes the notices again with the same revs", async () => {
+    const served: unknown[] = [...published];
+    served.splice(1, 0, { ...published[0], eventId: randomUUID(), type: "orchestration.Unknown" });
     const requests: string[] = [];
     const replay: Server = createServer((request, response) => {
       requests.push(request.url ?? "");
       const url = new URL(request.url ?? "", "http://x");
       const afterPosition = Number(url.searchParams.get("afterPosition"));
       const limit = Number(url.searchParams.get("limit"));
-      const events = published
-        .map((event, index) => ({ ...event, position: index + 1 }))
+      const events = served
+        .map((event, index) => ({ ...(event as object), position: index + 1 }))
         .filter(({ position }) => position > afterPosition)
         .slice(0, limit);
       response.setHeader("content-type", "application/json");
@@ -324,21 +394,27 @@ describe("projections", () => {
     await new Promise<void>((resolve) => replay.listen(0, "127.0.0.1", resolve));
     try {
       const { port } = replay.address() as AddressInfo;
-      const count = await rebuild(database.db, replayFrom(`http://127.0.0.1:${String(port)}`), 2);
-      assert.equal(count, published.length);
+      const result = await rebuild(database.db, replayFrom(`http://127.0.0.1:${String(port)}`), 2);
+      assert.deepEqual(result, {
+        applied: published.length,
+        skipped: 1,
+        skippedTypes: ["orchestration.Unknown"],
+      });
     } finally {
       await new Promise((resolve) => replay.close(resolve));
     }
     assert.equal(requests[0], "/internal/events?afterPosition=0&limit=2");
-    assert.equal(requests.length, Math.ceil(published.length / 2) + 1);
+    assert.equal(requests.length, Math.ceil(served.length / 2) + 1);
+    assert.equal(await rebuildRunning(database.db), false);
     assert.deepEqual(await allDocs(), live);
     assert.equal(await database.db.collection("processed").countDocuments(), 0);
     await startApp();
-    await waitFor(async () => (await views()).length === viewsBefore + liveRevs.size, 30_000, 100);
-    const republished = (await views()).slice(viewsBefore).map(({ message }) => message.payload);
-    assert.deepEqual(
-      republished.toSorted((a, b) => a.docId.localeCompare(b.docId) || a.rev - b.rev),
-      [...liveRevs.values()].toSorted((a, b) => a.docId.localeCompare(b.docId) || a.rev - b.rev),
+    await waitFor(
+      async () => (await views()).length === viewsBefore + livePayloads.length,
+      30_000,
+      100,
     );
+    const republished = (await views()).slice(viewsBefore).map(({ message }) => message.payload);
+    assert.deepEqual(republished.toSorted(byDoc), livePayloads.toSorted(byDoc));
   });
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ConfigError, loadConfig } from "@famashines/ai-systems-kit/config";
-import { Env, RebuildEnv } from "./config.ts";
+import { Env } from "./config.ts";
 
 const env = {
   MONGODB_URI: "mongodb://localhost:27017/?replicaSet=rs0",
@@ -23,9 +23,4 @@ test("the service name cannot change and the URL must be http", () => {
   assert.throws(() => loadConfig(Env, { ...env, SERVICE_NAME: "other" }), ConfigError);
   assert.throws(() => loadConfig(Env, { ...env, ORCHESTRATION_URL: "file:///x" }), ConfigError);
   assert.throws(() => loadConfig(Env, { ...env, NATS_PASSWORD: undefined }), ConfigError);
-});
-
-test("the rebuild needs no NATS settings", () => {
-  const { MONGODB_URI, ORCHESTRATION_URL } = env;
-  assert.equal(loadConfig(RebuildEnv, { MONGODB_URI, ORCHESTRATION_URL }).LOG_LEVEL, "info");
 });
