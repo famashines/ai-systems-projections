@@ -109,10 +109,11 @@ Rules:
 - Env vars: `MONGODB_URI`, `MONGODB_DATABASE`, `ORCHESTRATION_URL`,
   `LOG_LEVEL`. No NATS.
 
-Assumption, until orchestration (M1-06) has the replay API: the answer is
-JSON `{ "events": [ <event envelope with "position">, ... ] }`, in
-`position` order, as kit `readAll` gives them. Each event is checked with
-`parseEvent` of contracts.
+The replay API of orchestration (orchestration PR #1): `limit` is 100 by
+default and 1000 at most. The answer is JSON
+`{ "events": [ <EventEnvelopeV1 with "position">, ... ] }` in `position`
+order. The next page starts after the last `position`; an empty list is
+the end. projections checks each event with `parseEvent` of contracts.
 
 ## Config
 
