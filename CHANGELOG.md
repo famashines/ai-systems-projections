@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Release workflow: image, CycloneDX SBOM, grype scan, push to GHCR
+  by tag and digest, and a release pull request in `famashines/gitops`.
+
 ## 0.1.0
 
 - `tasks` read model from `orchestration.TaskSubmitted`: title, status,

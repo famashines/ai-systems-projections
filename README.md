@@ -183,6 +183,14 @@ read-only root file system; it writes no files. node is PID 1, so
 `main.ts` exits with 143 on SIGTERM or SIGINT while it connects; after the
 start the kit shutdown takes over.
 
+Release: a push to `main` runs `.github/workflows/release.yml`. It builds
+the image, makes a CycloneDX SBOM (a workflow artifact), and scans the
+image with grype. A HIGH or CRITICAL finding with a fix stops the
+release. Then it pushes `ghcr.io/famashines/ai-systems-projections:sha-<commit>` and
+opens a pull request in `famashines/gitops` that sets the tag and the
+digest in `kubernetes/ai-systems/ai-systems-projections/prod`. The owner merges it. The
+job needs the Actions secret `GITOPS_TOKEN`.
+
 ## Known limits
 
 - An event type that is not in the installed contracts goes to the DLQ
