@@ -9,7 +9,7 @@ import { UnavailableError } from "@famashines/ai-systems-kit/http";
 import type { Nats } from "@famashines/ai-systems-kit/messaging";
 import { processedMigration } from "@famashines/ai-systems-kit/messaging";
 import type { Migration } from "@famashines/ai-systems-kit/mongo";
-import type { ClientSession, Collection, Db } from "mongodb";
+import type { ClientSession, Collection, Db, Filter } from "mongodb";
 import { z } from "zod";
 import type { TaskListQuery } from "./query.ts";
 import { project, taskIdOf, type TaskDoc } from "./tasks.ts";
@@ -61,12 +61,15 @@ export function createProjector(db: Db, store: NoticeStore) {
   };
 }
 
-export const listTasks = (db: Db, { limit, before }: TaskListQuery): Promise<TaskDoc[]> =>
-  tasksOf(db)
-    .find(before === undefined ? {} : { createdAt: { $lt: new Date(before) } })
-    .sort({ createdAt: -1, _id: -1 })
-    .limit(limit)
-    .toArray();
+const pageFilter = ({ before, beforeId }: TaskListQuery): Filter<TaskDoc> => {
+  if (before === undefined) return {};
+  const at = new Date(before);
+  if (beforeId === undefined) return { createdAt: { $lt: at } };
+  return { $or: [{ createdAt: { $lt: at } }, { createdAt: at, _id: { $lt: beforeId } }] };
+};
+
+export const listTasks = (db: Db, query: TaskListQuery): Promise<TaskDoc[]> =>
+  tasksOf(db).find(pageFilter(query)).sort({ createdAt: -1, _id: -1 }).limit(query.limit).toArray();
 
 const StreamInfo = z.object({ state: z.object({ last_seq: z.int().nonnegative() }) });
 

@@ -1,12 +1,18 @@
-import { TaskListResultV1, Timestamp } from "@famashines/ai-systems-contracts";
+import { Id, TaskListResultV1, Timestamp } from "@famashines/ai-systems-contracts";
 import { validate, type Route } from "@famashines/ai-systems-kit/http";
 import { z } from "zod";
 import { toItem, type TaskDoc } from "./tasks.ts";
 
-export const TaskListQuery = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  before: Timestamp.optional(),
-});
+export const TaskListQuery = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    before: Timestamp.optional(),
+    beforeId: Id.optional(),
+  })
+  .refine((query) => query.beforeId === undefined || query.before !== undefined, {
+    message: "beforeId needs before",
+    path: ["beforeId"],
+  });
 export type TaskListQuery = z.infer<typeof TaskListQuery>;
 
 export interface TaskQueries {

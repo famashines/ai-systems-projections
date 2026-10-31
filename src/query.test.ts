@@ -70,10 +70,27 @@ test("passes limit and before to the query", async () => {
   const response = await fetch(`${base}/internal/tasks?limit=2&before=2026-10-31T09:00:00.000Z`);
   assert.equal(response.status, 200);
   assert.deepEqual(queries.at(-1), { limit: 2, before: "2026-10-31T09:00:00.000Z" });
+  const tied = await fetch(
+    `${base}/internal/tasks?limit=2&before=2026-10-31T09:00:00.000Z&beforeId=${doc._id}`,
+  );
+  assert.equal(tied.status, 200);
+  assert.deepEqual(queries.at(-1), {
+    limit: 2,
+    before: "2026-10-31T09:00:00.000Z",
+    beforeId: doc._id,
+  });
 });
 
 test("refuses a bad limit or before with 400", async () => {
-  for (const query of ["limit=0", "limit=101", "limit=1.5", "limit=x", "before=yesterday"]) {
+  for (const query of [
+    "limit=0",
+    "limit=101",
+    "limit=1.5",
+    "limit=x",
+    "before=yesterday",
+    `beforeId=${doc._id}`,
+    "before=2026-10-31T09:00:00.000Z&beforeId=x",
+  ]) {
     const response = await fetch(`${base}/internal/tasks?${query}`);
     assert.equal(response.status, 400, query);
     assert.equal(((await response.json()) as { code: string }).code, "validation_failed");
