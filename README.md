@@ -41,12 +41,14 @@ each source stream gives one document, so the document holds the
 checkpoint and there is no `checkpoints` collection yet (ARCHITECTURE 7).
 
 Title: control characters (`\p{Cc}`, so also `\r`, `\n`, tab and ESC),
-the line and paragraph separators (U+2028, U+2029) and the bidi controls
-(U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) become a
-space. Then the text is trimmed, cut after 80 graphemes
-(`Intl.Segmenter`, so an emoji with ZWJ stays whole) or before it is
-longer than 200 UTF-16 units (the limit of `TaskListItemV1.title`), and
-trimmed again.
+lone surrogates (`\p{Cs}`), the line and paragraph separators (U+2028,
+U+2029) and the bidi controls (U+061C, U+200E, U+200F, U+202A to U+202E,
+U+2066 to U+2069) become a space. Then the text is trimmed, cut after 80
+graphemes (`Intl.Segmenter`, so an emoji with ZWJ stays whole) or before
+it is longer than 200 UTF-16 units (the limit of `TaskListItemV1.title`),
+and trimmed again. If the first grapheme alone is longer than 200 units,
+the title is its first code points up to 200 units. An empty result
+becomes the fixed title `(no title)`, because `title` must not be empty.
 
 The pure function `project(current, event)` in `src/tasks.ts` gives the
 new document and its notice. The live consumer and the rebuild use it.
@@ -96,9 +98,10 @@ Also `/health`, `/ready` (MongoDB, NATS, consumer, relay) and `/metrics`.
 `--entrypoint node` with the argument `src/rebuild-main.ts`):
 
 ```
+write the marker { _id: "running" } in "rebuild"   (a pod that starts now refuses)
 check the durable "projections": num_waiting > 0 ?  -- yes --> refuse, exit 1
 wait about 6 s, check again                          -- yes --> refuse, exit 1
-write the marker { _id: "running" } in "rebuild"
+                    (on a refusal, remove the marker if this run wrote it)
 drop tasks, events (the notices), counters, processed; make indexes again
 GET <ORCHESTRATION_URL>/internal/events?afterPosition=<n>&limit=100, page by page
   each event: parseEvent --> fail: skip and count (type in the log)
