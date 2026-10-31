@@ -29,7 +29,14 @@ try {
   } finally {
     await nats.close();
   }
-  const result = await rebuild(mongo.db, replayFrom(config.ORCHESTRATION_URL));
+  const sources = [
+    config.ORCHESTRATION_URL,
+    config.CONVERSATION_HUB_URL,
+    config.AI_PROXY_URL,
+    config.BUDGET_URL,
+    config.AGENT_MANAGER_URL,
+  ].map(replayFrom);
+  const result = await rebuild(mongo.db, sources, config.OWNER_TIME_ZONE);
   if (result.skipped > 0) {
     logger.warn(
       { skipped: result.skipped, types: result.skippedTypes },

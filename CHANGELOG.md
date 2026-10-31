@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Contracts and kit v0.3.0.
+- `chat` read model (`ConversationMessageV1`) from `CONVERSATION`, with the
+  `taskId` of a new task from `orchestration.TaskSubmitted` and the cost
+  of each agent reply from `llm.CallCompleted` and `llm.CallFailed`, in
+  any order. Notices on `conversation:<id>`.
+- `GET /internal/conversations/:id/messages`: 200 with no items for an
+  unknown thread; a page has at most 900 KiB of JSON.
+- `budget_month` read model (`BudgetMonthV1`) from `BUDGET`, notices on
+  `budget`, `GET /internal/budget?month=` (404 with no cap and no spend).
+- `agents` read model (`AgentListItemV1`) from `AGENTS`, notices on
+  `agents`, `GET /internal/agents`.
+- `tasks`: status from `RunStarted`, `RunBlocked`, `RunCompleted`,
+  `RunFailed`; other orchestration events change nothing.
+- One durable ordered consumer `projections` for each of `ORCHESTRATION`,
+  `CONVERSATION`, `LLM`, `BUDGET` and `AGENTS`.
+- Notices of one source event are in the outbox stream
+  `notice-<eventId>`.
+- Rebuild from five replay APIs. New env vars: `CONVERSATION_HUB_URL`,
+  `AI_PROXY_URL`, `BUDGET_URL`, `AGENT_MANAGER_URL`, `OWNER_TIME_ZONE`.
+
 - Release workflow: image, CycloneDX SBOM, grype scan, push to GHCR
   by tag and digest, and a release pull request in `famashines/gitops`.
 

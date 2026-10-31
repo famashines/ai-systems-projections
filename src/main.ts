@@ -28,7 +28,7 @@ async function start(mongo: Mongo): Promise<void> {
     service,
     logger,
   });
-  const projections = startProjections(mongo.db, nats);
+  const projections = startProjections(mongo.db, nats, config.OWNER_TIME_ZONE);
   const app = createService({
     logger,
     metrics: telemetry.metricsHandler,

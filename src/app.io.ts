@@ -2,8 +2,16 @@ import { parseEvent } from "@famashines/ai-systems-contracts";
 import type { CloseHook, ReadinessCheck, Route } from "@famashines/ai-systems-kit/http";
 import { startConsumer, startRelay, type Nats } from "@famashines/ai-systems-kit/messaging";
 import type { Db } from "mongodb";
-import { createNoticeStore, createProjector, listTasks, viewsHeadSeq } from "./projector.io.ts";
-import { taskRoutes } from "./query.ts";
+import {
+  createNoticeStore,
+  createProjector,
+  listAgents,
+  listMessages,
+  listTasks,
+  readMonth,
+  viewsHeadSeq,
+} from "./projector.io.ts";
+import { routes } from "./query.ts";
 
 export interface Projections {
   routes: Route[];
@@ -11,25 +19,42 @@ export interface Projections {
   closeHooks: CloseHook[];
 }
 
-export function startProjections(db: Db, nats: Nats): Projections {
+export const sourceStreams = ["ORCHESTRATION", "CONVERSATION", "LLM", "BUDGET", "AGENTS"];
+
+export function startProjections(db: Db, nats: Nats, timeZone: string): Projections {
   const store = createNoticeStore(db);
-  const apply = createProjector(db, store);
-  const consumer = startConsumer({
-    nats,
-    db,
-    stream: "ORCHESTRATION",
-    filter: "orchestration.>",
-    ordered: true,
-    parse: parseEvent,
-    handler: (event, { markProcessed }) => apply(event, markProcessed),
-  });
+  const apply = createProjector(db, store, timeZone);
+  const consumers = sourceStreams.map((stream) => ({
+    stream,
+    consumer: startConsumer({
+      nats,
+      db,
+      stream,
+      filter: `${stream.toLowerCase()}.>`,
+      ordered: true,
+      parse: parseEvent,
+      handler: (event, { markProcessed }) => apply(event, markProcessed),
+    }),
+  }));
   const relay = startRelay({ store, nats, streams: ["VIEWS"] });
   return {
-    routes: taskRoutes({
+    routes: routes({
       headSeq: () => viewsHeadSeq(nats),
-      list: (query) => listTasks(db, query),
+      tasks: (query) => listTasks(db, query),
+      messages: (conversationId, query) => listMessages(db, conversationId, query),
+      month: (month) => readMonth(db, month),
+      agents: () => listAgents(db),
+      timeZone,
     }),
-    readiness: { consumer: consumer.ready, relay: relay.ready },
-    closeHooks: [relay.close, consumer.close],
+    readiness: {
+      ...Object.fromEntries(
+        consumers.map(({ stream, consumer }) => [
+          `consumer_${stream.toLowerCase()}`,
+          consumer.ready,
+        ]),
+      ),
+      relay: relay.ready,
+    },
+    closeHooks: [relay.close, ...consumers.map(({ consumer }) => consumer.close)],
   };
 }

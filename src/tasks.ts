@@ -1,11 +1,5 @@
-import {
-  viewSubject,
-  type RegisteredEvent,
-  type TaskListItemV1,
-  type TaskStatus,
-  type ViewMessageV1,
-} from "@famashines/ai-systems-contracts";
-import type { NewEvent } from "@famashines/ai-systems-kit/event-store";
+import type { RegisteredEvent, TaskListItemV1, TaskStatus } from "@famashines/ai-systems-contracts";
+import { noticeOf, type Notice } from "./notices.ts";
 
 export interface TaskDoc {
   _id: string;
@@ -19,7 +13,7 @@ export interface TaskDoc {
 
 export interface Change {
   doc: TaskDoc;
-  notice: NewEvent<ViewMessageV1>;
+  notice: Notice;
 }
 
 const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
@@ -61,33 +55,38 @@ export const toItem = (doc: TaskDoc): TaskListItemV1 => ({
   asOf: doc.asOf,
 });
 
-export const taskIdOf = (event: RegisteredEvent): string => event.payload.taskId;
+const statusAfter: Partial<Record<RegisteredEvent["type"], TaskStatus>> = {
+  "orchestration.RunStarted": "running",
+  "orchestration.RunBlocked": "blocked",
+  "orchestration.RunCompleted": "completed",
+  "orchestration.RunFailed": "failed",
+};
+
+export const taskIdOf = (event: RegisteredEvent): string | undefined =>
+  event.type === "orchestration.TaskSubmitted" || statusAfter[event.type] !== undefined
+    ? (event.payload as { taskId: string }).taskId
+    : undefined;
 
 export function project(current: TaskDoc | null, event: RegisteredEvent): Change | undefined {
   if (current && event.version <= current.asOf) return undefined;
   const at = new Date(event.occurredAt);
-  const doc: TaskDoc = {
-    _id: taskIdOf(event),
-    title: titleOf(event.payload.text),
-    status: "submitted",
-    createdAt: current?.createdAt ?? at,
-    updatedAt: at,
-    rev: (current?.rev ?? 0) + 1,
-    asOf: event.version,
-  };
-  const notice: NewEvent<ViewMessageV1> = {
-    type: viewSubject("tasks"),
-    schemaVersion: 1,
-    correlationId: event.correlationId,
-    causationId: event.eventId,
-    actor: { kind: "system", id: "projections" },
-    payload: {
-      topic: "tasks",
-      docId: doc._id,
-      rev: doc.rev,
-      data: toItem(doc),
-      commandId: event.causationId,
-    },
-  };
-  return { doc, notice };
+  const rev = (current?.rev ?? 0) + 1;
+  let doc: TaskDoc;
+  if (event.type === "orchestration.TaskSubmitted") {
+    doc = {
+      _id: event.payload.taskId,
+      title: titleOf(event.payload.text),
+      status: "submitted",
+      createdAt: current?.createdAt ?? at,
+      updatedAt: at,
+      rev,
+      asOf: event.version,
+    };
+  } else {
+    const status = statusAfter[event.type];
+    if (!current || status === undefined) return undefined;
+    doc = { ...current, status, updatedAt: at, rev, asOf: event.version };
+  }
+  const commandId = event.type === "orchestration.TaskSubmitted" ? event.causationId : undefined;
+  return { doc, notice: noticeOf(event, "tasks", doc, toItem(doc), commandId) };
 }

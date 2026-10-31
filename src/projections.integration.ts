@@ -6,6 +6,10 @@ import type { AddressInfo } from "node:net";
 import { Writable } from "node:stream";
 import { after, before, describe, test } from "node:test";
 import {
+  AgentListResultV1,
+  BudgetMonthV1,
+  ConversationMessageV1,
+  ConversationThreadResultV1,
   parseEvent,
   TaskListResultV1,
   ViewMessageV1,
@@ -24,7 +28,8 @@ import {
 import { jetstream, jetstreamManager, type JetStreamManager } from "@nats-io/jetstream";
 import { pino } from "pino";
 import { startProjections, type Projections } from "./app.io.ts";
-import { migrations, tasksOf } from "./projector.io.ts";
+import { monthKey } from "./budget.ts";
+import { collections, migrations, readModelCollections, tasksOf } from "./projector.io.ts";
 import {
   assertServiceStopped,
   markAndCheck,
@@ -33,7 +38,6 @@ import {
   replayFrom,
   type FetchPage,
 } from "./rebuild.io.ts";
-import type { TaskDoc } from "./tasks.ts";
 
 const streams = ["ORCHESTRATION", "CONVERSATION", "LLM", "BUDGET", "AGENTS", "PROMPTS"];
 const readGrants = streams.flatMap((stream) => {
@@ -56,7 +60,12 @@ accounts {
       {
         user: admin, password: admin
         permissions {
-          publish { allow: ["$JS.API.>", "$JS.ACK.>", "orchestration.>"] }
+          publish {
+            allow: [
+              "$JS.API.>", "$JS.ACK.>", "orchestration.>", "conversation.>", "llm.>", "budget.>",
+              "agents.>"
+            ]
+          }
           subscribe { allow: ["_INBOX_admin.>"] }
         }
       }
@@ -95,10 +104,14 @@ let admin: Nats;
 let service: Nats;
 let manager: JetStreamManager;
 let app: { projections: Projections; http: Service; base: string } | undefined;
-const published: RegisteredEvent[] = [];
+const zone = "Europe/Berlin";
+const sources = ["orchestration", "conversation", "llm", "budget", "agents"] as const;
+const published = new Map<string, RegisteredEvent[]>(sources.map((source) => [source, []]));
+const submittedTasks: TaskSubmittedEvent[] = [];
+type TaskSubmittedEvent = Extract<RegisteredEvent, { type: "orchestration.TaskSubmitted" }>;
 
 const startApp = async () => {
-  const projections = startProjections(database.db, service);
+  const projections = startProjections(database.db, service, zone);
   const http = createService({
     logger,
     drainDelayMs: 0,
@@ -138,7 +151,7 @@ before(async () => {
   ]);
   manager = await jetstreamManager(admin.connection);
   await createStreams(admin.connection, [
-    { name: "ORCHESTRATION", subjects: ["orchestration.>"] },
+    ...sources.map((source) => ({ name: source.toUpperCase(), subjects: [`${source}.>`] })),
     { name: "VIEWS", subjects: ["view.>"] },
     { name: "DLQ", subjects: ["dlq.>"] },
   ]);
@@ -159,7 +172,7 @@ const submitted = (
     eventId?: string;
     occurredAt?: string;
   } = {},
-): RegisteredEvent => {
+): TaskSubmittedEvent => {
   const taskId = overrides.taskId ?? randomUUID();
   return parseEvent({
     eventId: overrides.eventId ?? randomUUID(),
@@ -172,7 +185,7 @@ const submitted = (
     causationId: randomUUID(),
     actor: { kind: "owner", id: "owner" },
     payload: { taskId, text: overrides.text ?? "Write a plan", mode: "auto" },
-  });
+  }) as TaskSubmittedEvent;
 };
 
 const publish = async (event: RegisteredEvent, msgID = event.eventId): Promise<void> => {
@@ -180,13 +193,19 @@ const publish = async (event: RegisteredEvent, msgID = event.eventId): Promise<v
 };
 
 const publishNew = async (event: RegisteredEvent): Promise<void> => {
-  published.push(event);
+  published.get(event.type.slice(0, event.type.indexOf(".")))?.push(event);
+  if (event.type === "orchestration.TaskSubmitted" && event.payload.conversationId === undefined) {
+    submittedTasks.push(event);
+  }
   await publish(event);
 };
 
 const drained = async (): Promise<boolean> => {
-  const info = await manager.consumers.info("ORCHESTRATION", "projections");
-  return info.num_pending === 0 && info.num_ack_pending === 0;
+  for (const source of sources) {
+    const info = await manager.consumers.info(source.toUpperCase(), "projections");
+    if (info.num_pending > 0 || info.num_ack_pending > 0) return false;
+  }
+  return true;
 };
 
 const views = async (): Promise<{ message: ViewMessageV1; msgId: string; seq: number }[]> => {
@@ -209,7 +228,15 @@ const noticesOf = async (taskId: string) =>
 
 const doc = (taskId: string) => tasksOf(database.db).findOne({ _id: taskId });
 
-const allDocs = (): Promise<TaskDoc[]> => tasksOf(database.db).find().sort({ _id: 1 }).toArray();
+const allDocs = async (): Promise<Record<string, unknown[]>> =>
+  Object.fromEntries(
+    await Promise.all(
+      readModelCollections.map(async (name): Promise<[string, unknown[]]> => [
+        name,
+        await database.db.collection(name).find().sort({ _id: 1 }).toArray(),
+      ]),
+    ),
+  );
 
 describe("projections", () => {
   test("each TaskSubmitted gives one task document and one VIEWS notice", async () => {
@@ -251,7 +278,7 @@ describe("projections", () => {
   });
 
   test("a redelivered or older event changes nothing and gives no notice", async () => {
-    const [first] = published;
+    const [first] = submittedTasks;
     assert.ok(first);
     const before = await doc(first.payload.taskId);
     const count = (await views()).length;
@@ -335,7 +362,212 @@ describe("projections", () => {
     assert.equal((await fetch(`${base}/internal/tasks?limit=0`)).status, 400);
   });
 
-  let live: TaskDoc[] = [];
+  const make = (
+    type: string,
+    streamId: string,
+    version: number,
+    payload: object,
+    occurredAt = new Date().toISOString(),
+  ): RegisteredEvent =>
+    parseEvent({
+      eventId: randomUUID(),
+      type,
+      schemaVersion: 1,
+      streamId,
+      version,
+      occurredAt,
+      correlationId: randomUUID(),
+      causationId: randomUUID(),
+      actor: { kind: "system", id: "test" },
+      payload,
+    });
+
+  const get = async (path: string) => {
+    assert.ok(app);
+    return fetch(`${app.base}${path}`);
+  };
+
+  const message = (messageId: string) => collections(database.db).chat.findOne({ _id: messageId });
+
+  test("chat: the owner message gets its taskId in each order, a reply gets the cost of its task", async () => {
+    const conversationId = randomUUID();
+    const stream = `conversation-${conversationId}`;
+    const orders = ["task first", "message first", "same time"] as const;
+    const tasks: string[] = [];
+    let version = 0;
+    for (const order of orders) {
+      const messageId = randomUUID();
+      const taskId = randomUUID();
+      tasks.push(taskId);
+      version += 1;
+      const posted = make("conversation.OwnerMessagePosted", stream, version, {
+        conversationId,
+        messageId,
+        text: `Write a poem (${order})`,
+        intent: "new_task",
+      });
+      const task = make("orchestration.TaskSubmitted", `task-${taskId}`, 1, {
+        taskId,
+        text: `Write a poem (${order})`,
+        mode: "auto",
+        conversationId,
+        messageId,
+      });
+      if (order === "task first") {
+        await publishNew(task);
+        await waitFor(async () => (await doc(taskId)) !== null, 30_000, 100);
+        await publishNew(posted);
+      } else if (order === "message first") {
+        await publishNew(posted);
+        await waitFor(async () => (await message(messageId)) !== null, 30_000, 100);
+        await publishNew(task);
+      } else {
+        await Promise.all([publishNew(posted), publishNew(task)]);
+      }
+      await waitFor(async () => (await message(messageId))?.taskId === taskId, 30_000, 100);
+      assert.equal((await message(messageId))?.rev, 2, order);
+    }
+    const taskId = tasks[0] ?? "";
+    const callId = randomUUID();
+    const replyId = randomUUID();
+    const llm = (attempt: number, costMicroUsd: number) =>
+      make("llm.CallFailed", `call-${callId}`, attempt, {
+        taskId,
+        callId,
+        attempt,
+        model: "openai/gpt-4.1-nano",
+        errorClass: "provider",
+        reason: "down",
+        costMicroUsd,
+      });
+    await publishNew(llm(1, 300));
+    version += 1;
+    await publishNew(
+      make("conversation.AgentReplyPosted", stream, version, {
+        conversationId,
+        messageId: replyId,
+        text: "A poem",
+        taskId,
+        runId: randomUUID(),
+        sourceEventId: randomUUID(),
+      }),
+    );
+    await publishNew(llm(2, 500));
+    await waitFor(async () => (await message(replyId))?.costMicroUsd === 800, 30_000, 100);
+    assert.equal((await message(replyId))?.rev, 3);
+    await waitFor(drained, 30_000, 100);
+    const thread = ConversationThreadResultV1.parse(
+      await (await get(`/internal/conversations/${conversationId}/messages`)).json(),
+    );
+    assert.equal(thread.items.length, 4);
+    assert.deepEqual(
+      thread.items.map((item) => [item.role, item.taskId]),
+      [["agent", taskId], ...tasks.toReversed().map((id) => ["owner", id])],
+    );
+    const notices = (await views()).filter(
+      ({ message: view }) => view.type === `view.conversation.${conversationId}`,
+    );
+    for (const { message: view } of notices) {
+      assert.equal(ConversationMessageV1.safeParse(view.payload.data).success, true);
+    }
+    const last = notices.filter(({ message: view }) => view.payload.docId === replyId).at(-1);
+    assert.deepEqual(last?.message.payload.data, thread.items[0]);
+    const empty = await get(`/internal/conversations/${randomUUID()}/messages`);
+    assert.equal(empty.status, 200);
+    assert.deepEqual(((await empty.json()) as { items: unknown[] }).items, []);
+  });
+
+  test("budget: 404 with no data, then the cap and the month numbers", async () => {
+    assert.equal((await get("/internal/budget")).status, 404);
+    const month = monthKey(new Date(), zone);
+    await publishNew(
+      make("budget.BudgetSet", "budget-cap-month", 1, {
+        scope: { kind: "month" },
+        hardCapMicroUsd: 1000,
+      }),
+    );
+    const reservationId = randomUUID();
+    await publishNew(
+      make("budget.FundsReserved", `budget-month-${month}`, 1, {
+        reservationId,
+        taskId: randomUUID(),
+        agentId: randomUUID(),
+        scopes: [{ kind: "month", key: month }],
+        amountMicroUsd: 400,
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      }),
+    );
+    await publishNew(
+      make("budget.ReservationSettled", `budget-month-${month}`, 2, {
+        reservationId,
+        reservedMicroUsd: 400,
+        actualMicroUsd: 1200,
+      }),
+    );
+    await waitFor(async () => (await get("/internal/budget")).ok, 30_000, 100);
+    await waitFor(
+      async () =>
+        BudgetMonthV1.parse(await (await get("/internal/budget")).json()).spentMicroUsd === 1200,
+      30_000,
+      100,
+    );
+    assert.deepEqual(
+      BudgetMonthV1.parse(await (await get(`/internal/budget?month=${month}`)).json()),
+      {
+        month,
+        capMicroUsd: 1000,
+        spentMicroUsd: 1200,
+        reservedMicroUsd: 0,
+        remainingMicroUsd: 0,
+        overCapMicroUsd: 200,
+        rev: 3,
+        asOf: 2,
+      },
+    );
+    const other = BudgetMonthV1.parse(await (await get("/internal/budget?month=2020-01")).json());
+    assert.equal(other.rev, 0);
+    assert.equal(other.capMicroUsd, 1000);
+    const budgetNotices = (await views()).filter(
+      ({ message: view }) => view.type === "view.budget",
+    );
+    assert.deepEqual(
+      budgetNotices.map(({ message: view }) => view.payload.rev),
+      [1, 2, 3],
+    );
+  });
+
+  test("agents: the list follows the AGENTS stream", async () => {
+    const agentId = randomUUID();
+    const stream = `agent-${agentId}`;
+    const events = [
+      make("agents.AgentCreated", stream, 1, { agentId, name: "writer" }),
+      make("agents.AgentVersionPublished", stream, 2, {
+        agentId,
+        version: 1,
+        prompt: { promptId: randomUUID(), version: 1 },
+        models: ["openai/gpt-4.1-nano"],
+        limits: { maxCalls: 10, maxTokens: 4096, maxCostMicroUsd: 50000 },
+      }),
+      make("agents.AgentVersionActivated", stream, 3, { agentId, version: 1 }),
+      make("agents.AgentEnabled", stream, 4, { agentId }),
+    ];
+    for (const event of events) await publishNew(event);
+    const list = async () => AgentListResultV1.parse(await (await get("/internal/agents")).json());
+    await waitFor(async () => (await list()).items[0]?.enabled === true, 30_000, 100);
+    assert.deepEqual((await list()).items, [
+      {
+        agentId,
+        name: "writer",
+        enabled: true,
+        activeVersion: 1,
+        latestVersion: 1,
+        rev: 4,
+        asOf: 4,
+      },
+    ]);
+  });
+
+  let live: Record<string, unknown[]> = {};
   let livePayloads: ViewMessageV1["payload"][] = [];
   let viewsBefore = 0;
   const byDoc = (a: { docId: string; rev: number }, b: { docId: string; rev: number }) =>
@@ -364,7 +596,7 @@ describe("projections", () => {
 
   test("a rebuild that stops leaves its marker, and the service refuses to start", async () => {
     const failing: FetchPage = () => Promise.reject(new Error("replay API down"));
-    await assert.rejects(rebuild(database.db, failing), /replay API down/);
+    await assert.rejects(rebuild(database.db, [failing], zone), /replay API down/);
     assert.equal(await rebuildRunning(database.db), true);
     const child = spawn(process.execPath, ["src/main.ts"], {
       env: {
@@ -387,46 +619,68 @@ describe("projections", () => {
     assert.doesNotMatch(output, /connecting to NATS/);
   });
 
-  test("a rebuild from the replay API gives the same read model, skips bad events, and writes the notices again with the same revs", async () => {
-    const served: unknown[] = [...published];
-    served.splice(1, 0, { ...published[0], eventId: randomUUID(), type: "orchestration.Unknown" });
+  test("a rebuild from the replay APIs gives the same read models, skips bad events, and writes the last notice of each document again with the same rev", async () => {
     const requests: string[] = [];
-    const replay: Server = createServer((request, response) => {
-      requests.push(request.url ?? "");
-      const url = new URL(request.url ?? "", "http://x");
-      const afterPosition = Number(url.searchParams.get("afterPosition"));
-      const limit = Number(url.searchParams.get("limit"));
-      const events = served
-        .map((event, index) => ({ ...(event as object), position: index + 1 }))
-        .filter(({ position }) => position > afterPosition)
-        .slice(0, limit);
-      response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ events }));
-    });
-    await new Promise<void>((resolve) => replay.listen(0, "127.0.0.1", resolve));
+    const servers: Server[] = [];
+    const urls: string[] = [];
+    let served = 0;
+    for (const source of sources) {
+      const events: unknown[] = [...(published.get(source) ?? [])];
+      if (source === "orchestration") {
+        events.splice(1, 0, {
+          ...submittedTasks[0],
+          eventId: randomUUID(),
+          type: "orchestration.Unknown",
+        });
+      }
+      served += events.length;
+      const replay = createServer((request, response) => {
+        requests.push(`${source} ${request.url ?? ""}`);
+        const url = new URL(request.url ?? "", "http://x");
+        const afterPosition = Number(url.searchParams.get("afterPosition"));
+        const limit = Number(url.searchParams.get("limit"));
+        const page = events
+          .map((event, index) => ({ ...(event as object), position: index + 1 }))
+          .filter(({ position }) => position > afterPosition)
+          .slice(0, limit);
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ events: page }));
+      });
+      await new Promise<void>((resolve) => replay.listen(0, "127.0.0.1", resolve));
+      servers.push(replay);
+      urls.push(`http://127.0.0.1:${String((replay.address() as AddressInfo).port)}`);
+    }
     try {
-      const { port } = replay.address() as AddressInfo;
-      const result = await rebuild(database.db, replayFrom(`http://127.0.0.1:${String(port)}`), 2);
+      const result = await rebuild(database.db, urls.map(replayFrom), zone, 2);
       assert.deepEqual(result, {
-        applied: published.length,
+        applied: served - 1,
         skipped: 1,
         skippedTypes: ["orchestration.Unknown"],
       });
     } finally {
-      await new Promise((resolve) => replay.close(resolve));
+      for (const replay of servers) await new Promise((resolve) => replay.close(resolve));
     }
-    assert.equal(requests[0], "/internal/events?afterPosition=0&limit=2");
-    assert.equal(requests.length, Math.ceil(served.length / 2) + 1);
+    assert.equal(requests[0], "orchestration /internal/events?afterPosition=0&limit=2");
+    assert.ok(requests.includes("agents /internal/events?afterPosition=0&limit=2"));
     assert.equal(await rebuildRunning(database.db), false);
     assert.deepEqual(await allDocs(), live);
     assert.equal(await database.db.collection("processed").countDocuments(), 0);
     await startApp();
+    const lastOf = (payloads: ViewMessageV1["payload"][]) => [
+      ...new Map(
+        payloads.toSorted(byDoc).map((payload) => [`${payload.topic} ${payload.docId}`, payload]),
+      ).values(),
+    ];
+    const expected = lastOf(livePayloads);
     await waitFor(
-      async () => (await views()).length === viewsBefore + livePayloads.length,
+      async () =>
+        lastOf((await views()).slice(viewsBefore).map(({ message: view }) => view.payload))
+          .length === expected.length,
       30_000,
       100,
     );
-    const republished = (await views()).slice(viewsBefore).map(({ message }) => message.payload);
-    assert.deepEqual(republished.toSorted(byDoc), livePayloads.toSorted(byDoc));
+    await waitFor(drained, 30_000, 100);
+    const republished = (await views()).slice(viewsBefore).map(({ message: view }) => view.payload);
+    assert.deepEqual(lastOf(republished), expected);
   });
 });
