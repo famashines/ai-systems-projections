@@ -4,7 +4,12 @@ import { eventStoreMigration } from "@famashines/ai-systems-kit/event-store";
 import { processedMigration, type Nats } from "@famashines/ai-systems-kit/messaging";
 import type { Db } from "mongodb";
 import { z } from "zod";
-import { createNoticeStore, createProjector, tasksMigration } from "./projector.io.ts";
+import {
+  createNoticeStore,
+  createProjector,
+  readModelCollections,
+  readModelMigrations,
+} from "./projector.io.ts";
 
 export interface Positioned {
   raw: Record<string, unknown>;
@@ -81,41 +86,44 @@ export async function markAndCheck(db: Db, nats: Nats, checkMs = 6000): Promise<
   }
 }
 
-const resetCollections = ["tasks", "events", "counters", "processed"];
+const resetCollections = [...readModelCollections, "events", "counters", "processed"];
 
 const typeOf = (raw: Record<string, unknown>): string =>
   typeof raw.type === "string" ? raw.type.slice(0, 100) : "(no type)";
 
 export async function rebuild(
   db: Db,
-  fetchPage: FetchPage,
+  sources: readonly FetchPage[],
+  timeZone: string,
   pageSize = 100,
 ): Promise<RebuildResult> {
   await markers(db).replaceOne({ _id: "running" }, { startedAt: new Date() }, { upsert: true });
   for (const name of resetCollections) await db.dropCollection(name);
-  for (const migration of [eventStoreMigration, processedMigration, tasksMigration]) {
+  for (const migration of [eventStoreMigration, processedMigration, ...readModelMigrations]) {
     await migration.up(db);
   }
-  const apply = createProjector(db, createNoticeStore(db));
+  const apply = createProjector(db, createNoticeStore(db), timeZone);
   const result: RebuildResult = { applied: 0, skipped: 0, skippedTypes: [] };
-  let after = 0;
-  for (;;) {
-    const page = await fetchPage(after, pageSize);
-    const last = page.at(-1);
-    if (!last) break;
-    for (const { raw } of page) {
-      let event: RegisteredEvent;
-      try {
-        event = parseEvent(raw);
-      } catch {
-        result.skipped += 1;
-        if (!result.skippedTypes.includes(typeOf(raw))) result.skippedTypes.push(typeOf(raw));
-        continue;
+  for (const fetchPage of sources) {
+    let after = 0;
+    for (;;) {
+      const page = await fetchPage(after, pageSize);
+      const last = page.at(-1);
+      if (!last) break;
+      for (const { raw } of page) {
+        let event: RegisteredEvent;
+        try {
+          event = parseEvent(raw);
+        } catch {
+          result.skipped += 1;
+          if (!result.skippedTypes.includes(typeOf(raw))) result.skippedTypes.push(typeOf(raw));
+          continue;
+        }
+        await apply(event);
+        result.applied += 1;
       }
-      await apply(event);
-      result.applied += 1;
+      after = last.position;
     }
-    after = last.position;
   }
   await markers(db).deleteOne({ _id: "running" });
   return result;

@@ -130,3 +130,52 @@ test("each title is a valid TaskListItemV1 title", () => {
     );
   }
 });
+
+const later = (type: string, version: number, payload: object): RegisteredEvent =>
+  parseEvent({
+    eventId: "3a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    type,
+    schemaVersion: 1,
+    streamId: `task-${taskId}`,
+    version,
+    occurredAt: "2026-10-31T09:20:00.000Z",
+    correlationId: taskId,
+    causationId: eventId,
+    actor: { kind: "system", id: "orchestration" },
+    payload,
+  });
+
+test("run events set the task status, with no commandId; other events change nothing", () => {
+  const first = project(null, submitted());
+  assert.ok(first);
+  const runId = "4b2c3d4e-5f6a-4b7c-9d8e-0f1a2b3c4d5e";
+  const reason = "Monthly cap reached";
+  const cases = [
+    ["orchestration.RunStarted", { taskId, runId }, "running"],
+    ["orchestration.RunBlocked", { taskId, runId, code: "budget_refused", reason }, "blocked"],
+    ["orchestration.RunFailed", { taskId, runId, code: "empty_output", reason }, "failed"],
+    [
+      "orchestration.RunCompleted",
+      { taskId, runId, summary: "Done", costMicroUsd: 10 },
+      "completed",
+    ],
+  ] as const;
+  for (const [type, payload, status] of cases) {
+    const change = project(first.doc, later(type, 2, payload));
+    assert.ok(change, type);
+    assert.equal(change.doc.status, status);
+    assert.equal(change.doc.rev, 2);
+    assert.equal(change.doc.asOf, 2);
+    assert.equal(change.doc.title, first.doc.title);
+    assert.equal(change.notice.payload.commandId, undefined);
+  }
+  assert.equal(project(null, later("orchestration.RunStarted", 2, { taskId, runId })), undefined);
+  const refused = later("orchestration.MessageRefused", 2, {
+    taskId,
+    conversationId: taskId,
+    messageId: eventId,
+    intent: "steer",
+    reason,
+  });
+  assert.equal(project(first.doc, refused), undefined);
+});
