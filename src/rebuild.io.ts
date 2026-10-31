@@ -67,6 +67,20 @@ const markers = (db: Db) => db.collection<{ _id: string; startedAt: Date }>("reb
 export const rebuildRunning = async (db: Db): Promise<boolean> =>
   (await markers(db).findOne({ _id: "running" })) !== null;
 
+export async function markAndCheck(db: Db, nats: Nats, checkMs = 6000): Promise<void> {
+  const { upsertedCount } = await markers(db).updateOne(
+    { _id: "running" },
+    { $setOnInsert: { startedAt: new Date() } },
+    { upsert: true },
+  );
+  try {
+    await assertServiceStopped(nats, checkMs);
+  } catch (error) {
+    if (upsertedCount === 1) await markers(db).deleteOne({ _id: "running" });
+    throw error;
+  }
+}
+
 const resetCollections = ["tasks", "events", "counters", "processed"];
 
 const typeOf = (raw: Record<string, unknown>): string =>

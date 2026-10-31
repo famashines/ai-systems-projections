@@ -27,6 +27,7 @@ import { startProjections, type Projections } from "./app.io.ts";
 import { migrations, tasksOf } from "./projector.io.ts";
 import {
   assertServiceStopped,
+  markAndCheck,
   rebuild,
   rebuildRunning,
   replayFrom,
@@ -308,7 +309,9 @@ describe("projections", () => {
     assert.equal(first.items.length, 3);
     const tie = new Date(Date.parse(first.items[0]?.createdAt ?? "") + 60_000).toISOString();
     const older = new Date(Date.parse(tie) - 1).toISOString();
-    for (const occurredAt of [tie, tie, tie, older]) await publishNew(submitted({ occurredAt }));
+    for (const [index, occurredAt] of [tie, tie, tie, older].entries()) {
+      await publishNew(submitted({ occurredAt, text: index === 0 ? "\u202E" : "Write a plan" }));
+    }
     await waitFor(async () => (await list("")).items.length === 7, 30_000, 100);
     const all = await list("limit=100");
     const times = all.items.map((item) => item.createdAt);
@@ -326,6 +329,7 @@ describe("projections", () => {
       seen,
       all.items.map((item) => item.taskId),
     );
+    assert.equal(all.items.filter((item) => item.title === "(no title)").length, 1);
     const onlyBefore = await list(`limit=100&before=${tie}`);
     assert.equal(onlyBefore.items.length, 4);
     assert.equal((await fetch(`${base}/internal/tasks?limit=0`)).status, 400);
@@ -343,11 +347,19 @@ describe("projections", () => {
     livePayloads = (await views()).map(({ message }) => message.payload);
     viewsBefore = livePayloads.length;
     await assert.rejects(assertServiceStopped(service, 100), /waiting pulls/);
+    await assert.rejects(markAndCheck(database.db, service, 100), /waiting pulls/);
+    assert.equal(await rebuildRunning(database.db), false);
+    const rebuildMarkers = database.db.collection<{ _id: string }>("rebuild");
+    await rebuildMarkers.insertOne({ _id: "running" });
+    await assert.rejects(markAndCheck(database.db, service, 100), /waiting pulls/);
+    assert.equal(await rebuildRunning(database.db), true);
+    await rebuildMarkers.deleteOne({ _id: "running" });
     await stopApp();
     const waiting = async () =>
       (await manager.consumers.info("ORCHESTRATION", "projections")).num_waiting;
     await waitFor(async () => (await waiting()) === 0, 30_000, 100);
-    await assertServiceStopped(service, 100);
+    await markAndCheck(database.db, service, 100);
+    assert.equal(await rebuildRunning(database.db), true);
   });
 
   test("a rebuild that stops leaves its marker, and the service refuses to start", async () => {
