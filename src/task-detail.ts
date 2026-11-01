@@ -238,7 +238,7 @@ const outputsOf = (event: RegisteredEvent): OutputDoc[] => {
 
 function submittedDoc(current: DetailDoc | null, event: RegisteredEvent): DetailDoc | null {
   if (event.type !== "orchestration.TaskSubmitted") return null;
-  const { taskId, text, mode, conversationId } = event.payload;
+  const { taskId, text, mode, conversationId, model, effort } = event.payload;
   return {
     _id: taskId,
     taskId,
@@ -246,6 +246,8 @@ function submittedDoc(current: DetailDoc | null, event: RegisteredEvent): Detail
     status: "submitted",
     mode,
     ...(conversationId === undefined ? {} : { conversationId }),
+    ...(model === undefined ? {} : { model }),
+    ...(effort === undefined ? {} : { effort }),
     createdAt: current?.createdAt ?? event.occurredAt,
     updatedAt: event.occurredAt,
     currentCall: null,

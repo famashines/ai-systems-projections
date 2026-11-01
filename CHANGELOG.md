@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Contracts v0.5.0. `task_details` copies `model` and `effort` from
+  `TaskSubmitted` into `TaskDetailV1`. Absent means auto. Old tasks have
+  neither field, so no rebuild is necessary. Projections must run v0.5.0
+  before api-gateway (deploy order of contracts 0.5.0, step 2): on v0.4.1
+  it strips both fields, and it sends a `CallRequested` with `maxTokens`
+  above 16384 to the DLQ.
 - Contracts v0.4.1. Projections must run v0.4.1 before orchestration
   sends the M3 events (deploy order of contracts 0.4.1, step 1).
 - `task_details` read model (`TaskDetailV1`) from the task stream: plan

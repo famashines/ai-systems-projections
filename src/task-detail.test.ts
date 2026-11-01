@@ -27,6 +27,7 @@ const checkpointId = id(41);
 const conversationId = id(51);
 const messageId = id(52);
 const model = "openai/gpt-4.1-nano";
+const taskModel = "anthropic/claude-opus-4.8";
 
 const at = (second: number): string => new Date(Date.UTC(2026, 10, 1, 9, 0, second)).toISOString();
 
@@ -86,7 +87,15 @@ const called = (callId: string, kind: string) => ({
 const full: [string, object][] = [
   [
     "orchestration.TaskSubmitted",
-    { taskId, text: "Write a report", mode: "approval", conversationId, messageId },
+    {
+      taskId,
+      text: "Write a report",
+      mode: "approval",
+      conversationId,
+      messageId,
+      model: taskModel,
+      effort: "high",
+    },
   ],
   ["orchestration.CallRequested", called(planCall, "plan")],
   ["orchestration.CallSettled", settled(planCall, "plan", 100)],
@@ -191,6 +200,8 @@ test("a full run gives a valid detail document after each event", () => {
     status: "completed",
     mode: "auto",
     conversationId,
+    model: taskModel,
+    effort: "high",
     createdAt: at(1),
     updatedAt: at(36),
     plan: {
@@ -438,6 +449,15 @@ test("the task statuses before a run", () => {
   assert.equal(cancelled?.status, "cancelled");
   assert.equal(cancelled.currentCall, null);
   assert.equal(cancelled.reason, undefined);
+});
+
+test("a task with no model and no effort is auto: the detail has neither field", () => {
+  const { doc } = replay(
+    stream([["orchestration.TaskSubmitted", { taskId, text: "Write a report", mode: "auto" }]]),
+  );
+  assert.ok(doc);
+  assert.equal(Object.hasOwn(doc, "model"), false);
+  assert.equal(Object.hasOwn(doc, "effort"), false);
 });
 
 test("an event before TaskSubmitted, an old version, or an event with no effect changes nothing", () => {
