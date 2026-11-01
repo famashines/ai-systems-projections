@@ -331,6 +331,46 @@ test("RunCancelled and RunFailed end the open subtasks", () => {
   );
 });
 
+test("a done, failed or blocked subtask stays unchanged at RunCancelled or RunFailed", () => {
+  const ended = replay(
+    stream(
+      [
+        [
+          "orchestration.SubtaskStarted",
+          { ...run, subtaskId: c, tryNumber: 1, callId: callC, agentId: agent, agentVersion: 1 },
+        ],
+        [
+          "orchestration.SubtaskFailed",
+          { ...run, subtaskId: c, tryNumber: 1, code: "unavailable", reason: "Down", ...usage(0) },
+        ],
+        [
+          "orchestration.SubtaskBlocked",
+          { ...run, subtaskId: b, code: "forbidden", reason: "No permission" },
+        ],
+      ],
+      `task-${taskId}`,
+      19,
+    ),
+    replay(stream(full.slice(0, 18))),
+  );
+  assert.ok(ended.doc);
+  const before = ended.doc.subtasks;
+  assert.deepEqual(
+    before.map((state) => state.status),
+    ["done", "blocked", "failed"],
+  );
+  for (const [type, payload] of [
+    ["orchestration.RunCancelled", run],
+    ["orchestration.RunFailed", { ...run, code: "internal", reason: "Broken" }],
+  ] as [string, object][]) {
+    const [event] = stream([[type, payload]], `task-${taskId}`, 22);
+    assert.ok(event);
+    const change = projectDetail(ended.doc, event);
+    assert.ok(change);
+    assert.deepEqual(change.doc.subtasks, before, type);
+  }
+});
+
 test("a refused or expired checkpoint keeps the subtask status until SubtaskFailed", () => {
   const opened = stream(full.slice(0, 11).concat([full[19] as [string, object]]));
   for (const decision of ["refused", "expired"]) {

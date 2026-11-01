@@ -407,6 +407,18 @@ repo. A manual run (`workflow_dispatch`) works only on `main`.
   (`rev` 0) gets the next `BudgetSet` notice only for the month of that
   event. At a month start, the first reserve of the month makes the
   document and its notice.
+- A task with a `TaskSubmitted` before the deploy of this version has no
+  `task_details` and no `task_outputs` document, so
+  `GET /api/tasks/:id` gives 404 for it. Run `npm run rebuild` once after
+  this deploy (see "Rebuild").
+- A DLQ event that is replayed later has a `version` that is not higher
+  than `asOf` when later events of its stream were applied, so the
+  handler skips it. Then the live document and a rebuilt document can
+  differ. Run `npm run rebuild` after a DLQ replay of `ORCHESTRATION`.
+- Each `task:<id>` notice has the full `TaskDetailV1` document. A typical
+  task gives about 450 KB of notices, the worst case about 10 MB. This
+  fills `VIEWS` (256 MiB, discard old) faster, so the resume window of a
+  client with `lastSeq` gets shorter, and more clients get `resync`.
 - Tasks of an orchestration before v0.4.1 have no `CallSettled`, so
   their detail shows the cost 0. The chat reply cost comes from the
   `llm.*` attempts and is correct for them.
