@@ -25,7 +25,7 @@ api-gateway --GET /internal/...--> read models + headSeq (STREAM.INFO VIEWS)
 
 | Read model     | Source events                                                                                                                                                  | Topic               |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `tasks`        | the `orchestration.*` events of the status table of contracts v0.4.1                                                                                           | `tasks`             |
+| `tasks`        | the `orchestration.*` events of the status table of contracts v0.5.0                                                                                           | `tasks`             |
 | `task_details` | all `orchestration.*` events of the task stream `task-<id>`; the outputs in `task_outputs`                                                                     | `task:<id>`         |
 | `chat`         | `conversation.OwnerMessagePosted`, `AgentReplyPosted`; the `taskId` from `orchestration.TaskSubmitted`; the cost from `llm.CallCompleted` and `llm.CallFailed` | `conversation:<id>` |
 | `budget_month` | `budget.BudgetSet`, `FundsReserved`, `ReservationSettled`, `ReservationExpired`                                                                                | `budget`            |
@@ -86,6 +86,7 @@ checkpoint. The pure function `projectDetail(current, event)` in
 | `title`, `createdAt`       | `TaskSubmitted`, the same title rule as `tasks`                                                                                          |
 | `status`                   | the task status column of the status table (`statusAfter`)                                                                               |
 | `mode`                     | `TaskSubmitted`, then `TaskModeChanged`                                                                                                  |
+| `model`, `effort`          | `TaskSubmitted`; absent means auto                                                                                                       |
 | `plan`                     | `PlanProposed` and `PlanEdited`; `SubtaskReassigned` sets `agentId` and `model` (no `model` removes it)                                  |
 | `runId`                    | `RunStarted`; it also clears `subtasks` and `checkpoints`                                                                                |
 | `subtasks`                 | the subtask status column of the status table; plan order                                                                                |
@@ -201,7 +202,7 @@ The notice outbox is the kit event store in the same database:
 collections `events`, `counters` and `commands` (the kit names, in place of
 `outbox_views` in ARCHITECTURE 7). The kit relay publishes each notice to
 the subject in its `type`, with `Nats-Msg-Id` = the notice `eventId`. A
-message is a `ViewMessageV1` of contracts v0.4.1:
+message is a `ViewMessageV1` of contracts v0.5.0:
 
 ```
 { eventId, type: "view.tasks", schemaVersion: 1,
@@ -362,7 +363,7 @@ The kit and contracts come from git tags (see the kit README for
 `allowScripts`):
 
 ```json
-"@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.4.1",
+"@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.5.0",
 "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#v0.3.0"
 ```
 
@@ -419,6 +420,8 @@ repo. A manual run (`workflow_dispatch`) works only on `main`.
   task gives about 450 KB of notices, the worst case about 10 MB. This
   fills `VIEWS` (256 MiB, discard old) faster, so the resume window of a
   client with `lastSeq` gets shorter, and more clients get `resync`.
+- Tasks of an orchestration before v0.5.0 have no `model` and no
+  `effort`, so their detail shows auto. No rebuild is necessary.
 - Tasks of an orchestration before v0.4.1 have no `CallSettled`, so
   their detail shows the cost 0. The chat reply cost comes from the
   `llm.*` attempts and is correct for them.
