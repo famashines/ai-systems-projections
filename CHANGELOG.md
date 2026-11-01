@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Contracts v0.4.1. Projections must run v0.4.1 before orchestration
+  sends the M3 events (deploy order of contracts 0.4.1, step 1).
+- `task_details` read model (`TaskDetailV1`) from the task stream: plan
+  with `SubtaskReassigned`, subtask states and the latest checkpoint of
+  each subtask from the status table, `currentCall`, the cost from
+  `CallSettled`. Notices on `task:<id>`.
+- `task_outputs` (`TaskOutputV1`): the run result from `RunCompleted` and
+  each subtask output from `SubtaskCompleted`.
+- `GET /internal/tasks/:id`, `GET /internal/tasks/:id/output`,
+  `GET /internal/tasks/:id/subtasks/:sid/output`.
+- `tasks`: the status of all task events of the status table
+  (`clarifying`, `planning`, `awaiting_approval`, `paused`, `cancelled`,
+  `rejected` are new).
+
 - Contracts and kit v0.3.0.
 - `chat` read model (`ConversationMessageV1`) from `CONVERSATION`, with the
   `taskId` of a new task from `orchestration.TaskSubmitted` and the cost

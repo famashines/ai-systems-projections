@@ -11,7 +11,9 @@ import {
   ConversationMessageV1,
   ConversationThreadResultV1,
   parseEvent,
+  TaskDetailV1,
   TaskListResultV1,
+  TaskOutputV1,
   ViewMessageV1,
   type RegisteredEvent,
 } from "@famashines/ai-systems-contracts";
@@ -223,8 +225,11 @@ const views = async (): Promise<{ message: ViewMessageV1; msgId: string; seq: nu
   return found;
 };
 
+const taskNotices = async () =>
+  (await views()).filter(({ message }) => message.type === "view.tasks");
+
 const noticesOf = async (taskId: string) =>
-  (await views()).filter(({ message }) => message.payload.docId === taskId);
+  (await taskNotices()).filter(({ message }) => message.payload.docId === taskId);
 
 const doc = (taskId: string) => tasksOf(database.db).findOne({ _id: taskId });
 
@@ -242,8 +247,8 @@ describe("projections", () => {
   test("each TaskSubmitted gives one task document and one VIEWS notice", async () => {
     const events = [submitted({ text: `  ${"x".repeat(90)}  ` }), submitted()];
     for (const event of events) await publishNew(event);
-    await waitFor(async () => (await views()).length === 2, 30_000, 100);
-    const found = await views();
+    await waitFor(async () => (await views()).length === 4, 30_000, 100);
+    const found = await taskNotices();
     for (const [index, event] of events.entries()) {
       const { taskId } = event.payload;
       const stored = await doc(taskId);
@@ -565,6 +570,115 @@ describe("projections", () => {
         asOf: 4,
       },
     ]);
+  });
+
+  test("task detail: an M3 run gives the detail, the outputs and task:<id> notices; an unknown type goes to the DLQ", async () => {
+    const taskId = randomUUID();
+    const runId = randomUUID();
+    const subtaskId = randomUUID();
+    const callId = randomUUID();
+    const stream = `task-${taskId}`;
+    const subtasks = [
+      {
+        subtaskId,
+        title: "Step",
+        instructions: "Do it",
+        agentId: randomUUID(),
+        dependsOn: [],
+        needsApproval: false,
+      },
+    ];
+    const steps: [string, object][] = [
+      ["orchestration.TaskSubmitted", { taskId, text: "Write a report", mode: "auto" }],
+      ["orchestration.PlanProposed", { taskId, planVersion: 1, subtasks, awaitsApproval: false }],
+      ["orchestration.PlanApproved", { taskId, planVersion: 1 }],
+      ["orchestration.RunStarted", { taskId, runId }],
+      ["orchestration.SubtaskQueued", { taskId, runId, subtaskId }],
+      [
+        "orchestration.SubtaskStarted",
+        { taskId, runId, subtaskId, tryNumber: 1, callId, agentId: randomUUID(), agentVersion: 1 },
+      ],
+      [
+        "orchestration.SubtaskCompleted",
+        {
+          taskId,
+          runId,
+          subtaskId,
+          callId,
+          text: "Part",
+          inputTokens: 1,
+          outputTokens: 2,
+          costMicroUsd: 40,
+        },
+      ],
+      [
+        "orchestration.CallSettled",
+        {
+          taskId,
+          callId,
+          kind: "subtask",
+          subtaskId,
+          inputTokens: 1,
+          outputTokens: 2,
+          costMicroUsd: 40,
+        },
+      ],
+      ["orchestration.RunCompleted", { taskId, runId, summary: "The report", costMicroUsd: 40 }],
+    ];
+    const events = steps.map(([type, payload], index) => make(type, stream, index + 1, payload));
+    await publishNew(
+      make("llm.CallFailed", `call-${callId}`, 1, {
+        taskId,
+        callId,
+        attempt: 1,
+        model: "openai/gpt-4.1-nano",
+        errorClass: "cancelled",
+        reason: "Stopped",
+        costMicroUsd: 0,
+      }),
+    );
+    for (const event of events.slice(0, 5)) await publishNew(event);
+    await publish({
+      ...events[4],
+      eventId: randomUUID(),
+      type: "orchestration.FutureThing",
+    } as never);
+    for (const event of events.slice(5)) await publishNew(event);
+    await waitFor(async () => (await get(`/internal/tasks/${taskId}/output`)).ok, 30_000, 100);
+    const detail = TaskDetailV1.parse(await (await get(`/internal/tasks/${taskId}`)).json());
+    assert.equal(detail.status, "completed");
+    assert.equal(detail.costMicroUsd, 40);
+    assert.equal(detail.rev, 8);
+    assert.equal(detail.asOf, 9);
+    assert.deepEqual(
+      detail.subtasks.map((state) => [state.status, state.tries, state.costMicroUsd]),
+      [["done", 1, 40]],
+    );
+    assert.deepEqual(
+      TaskOutputV1.parse(await (await get(`/internal/tasks/${taskId}/output`)).json()),
+      { taskId, runId, text: "The report" },
+    );
+    assert.deepEqual(
+      TaskOutputV1.parse(
+        await (await get(`/internal/tasks/${taskId}/subtasks/${subtaskId}/output`)).json(),
+      ),
+      { taskId, runId, subtaskId, text: "Part" },
+    );
+    assert.equal((await get(`/internal/tasks/${randomUUID()}`)).status, 404);
+    const notices = (await views()).filter(
+      ({ message: view }) => view.type === `view.task.${taskId}`,
+    );
+    assert.deepEqual(
+      notices.map(({ message: view }) => view.payload.rev),
+      [1, 2, 3, 4, 5, 6, 7, 8],
+    );
+    assert.deepEqual(notices.at(-1)?.message.payload.data, detail);
+    const list = TaskListResultV1.parse(await (await get("/internal/tasks?limit=100")).json());
+    assert.equal(list.items.find((item) => item.taskId === taskId)?.status, "completed");
+    const dlq = await manager.streams.info("DLQ", { subjects_filter: ">" });
+    assert.ok(
+      Object.keys(dlq.state.subjects ?? {}).includes("dlq.projections.orchestration.FutureThing"),
+    );
   });
 
   let live: Record<string, unknown[]> = {};

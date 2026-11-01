@@ -25,7 +25,8 @@ api-gateway --GET /internal/...--> read models + headSeq (STREAM.INFO VIEWS)
 
 | Read model     | Source events                                                                                                                                                  | Topic               |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `tasks`        | `orchestration.TaskSubmitted`, `RunStarted`, `RunBlocked`, `RunCompleted`, `RunFailed`                                                                         | `tasks`             |
+| `tasks`        | the `orchestration.*` events of the status table of contracts v0.4.1                                                                                           | `tasks`             |
+| `task_details` | all `orchestration.*` events of the task stream `task-<id>`; the outputs in `task_outputs`                                                                     | `task:<id>`         |
 | `chat`         | `conversation.OwnerMessagePosted`, `AgentReplyPosted`; the `taskId` from `orchestration.TaskSubmitted`; the cost from `llm.CallCompleted` and `llm.CallFailed` | `conversation:<id>` |
 | `budget_month` | `budget.BudgetSet`, `FundsReserved`, `ReservationSettled`, `ReservationExpired`                                                                                | `budget`            |
 | `agents`       | `agents.AgentCreated`, `AgentVersionPublished`, `AgentVersionActivated`, `AgentEnabled`, `AgentDisabled`                                                       | `agents`            |
@@ -46,9 +47,11 @@ Database `projections` (`MONGODB_DATABASE`), one document for each task:
 | `rev`       | 1 for a new document, plus 1 for each change                 |
 | `asOf`      | `version` of the last source event that changed the document |
 
-Status: `TaskSubmitted` gives `submitted`, `RunStarted` `running`,
-`RunBlocked` `blocked`, `RunCompleted` `completed`, `RunFailed` `failed`.
-A run event for a task with no document changes nothing.
+Status: the task status column of the status table in the contracts
+README ("Tasks and plans"), function `statusAfter` in `src/tasks.ts`. An
+event with no status change (`PlanApproved`, the subtask events,
+`CallSettled` and the others) changes nothing in `tasks`. An event for a
+task with no document changes nothing.
 
 The dates come from the events, not from the clock, so a rebuild gives the
 same documents. `asOf` is the checkpoint of the source stream: the handler
@@ -68,6 +71,57 @@ becomes the fixed title `(no title)`, because `title` must not be empty.
 
 The pure function `project(current, event)` in `src/tasks.ts` gives the
 new document and its notice. The live consumer and the rebuild use it.
+
+## Read model `task_details`
+
+One `TaskDetailV1` document for each task (`_id` = `taskId`), from the
+events of the task stream `task-<id>` only. ARCHITECTURE 7 puts all
+results and costs of a task in that stream (`CallSettled`), so the order
+of other streams cannot change the document, and `asOf` is the one
+checkpoint. The pure function `projectDetail(current, event)` in
+`src/task-detail.ts` gives the document, its outputs and its notice.
+
+| Field                      | From                                                                                                                                     |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`, `createdAt`       | `TaskSubmitted`, the same title rule as `tasks`                                                                                          |
+| `status`                   | the task status column of the status table (`statusAfter`)                                                                               |
+| `mode`                     | `TaskSubmitted`, then `TaskModeChanged`                                                                                                  |
+| `plan`                     | `PlanProposed` and `PlanEdited`; `SubtaskReassigned` sets `agentId` and `model` (no `model` removes it)                                  |
+| `runId`                    | `RunStarted`; it also clears `subtasks` and `checkpoints`                                                                                |
+| `subtasks`                 | the subtask status column of the status table; plan order                                                                                |
+| `checkpoints`              | `CheckpointOpened` replaces the checkpoint of its subtask (only the latest); `CheckpointResolved` sets `status`, `comment`, `resolvedAt` |
+| `currentCall`              | `CallRequested` with the kind `plan`, `aggregate` or `check`; `null` after the `CallSettled` of that call and after the end of the task  |
+| `costMicroUsd`             | the sum of all `CallSettled` costs, at most 1e12 (`CapMicroUsd`)                                                                         |
+| `reason`                   | `PlanRejected`, `TaskCancelled`, `RunBlocked`, `RunFailed`, `RunCancelled`; removed by `RunStarted`, `RunResumed` and `RunCompleted`     |
+| `updatedAt`, `rev`, `asOf` | the event that changed the document                                                                                                      |
+
+A subtask state (`SubtaskStateV1`):
+
+- `tries` is the `tryNumber` of the last `SubtaskStarted` or
+  `SubtaskFailed`. A retry by the owner starts it again at 1.
+- `startedAt` is the first start in the run, `endedAt` the time of
+  `SubtaskCompleted`, `SubtaskFailed` or the end of the run. A new start
+  removes `endedAt`, `retryAt` and `reason`. `SubtaskQueued` removes them
+  too.
+- `retryAt` comes from `SubtaskRetrying`, `reason` from `SubtaskFailed`
+  and `SubtaskBlocked`.
+- Tokens and cost are the sums of the `CallSettled` events with this
+  `subtaskId`: all tries, also failed, blocked and cancelled calls.
+  `SubtaskCompleted` and `SubtaskFailed` usage is not added, so nothing
+  counts twice.
+- `RunFailed` and `RunCancelled`: `running`, `queued`, `retrying` and
+  `awaiting_approval` become `cancelled` (with `endedAt`), `waiting`
+  becomes `skipped`.
+
+`TaskOutputV1` documents are in `task_outputs`, written in the same
+transaction: `_id` = `taskId` for the run result (`RunCompleted.summary`)
+and `<taskId>:<subtaskId>` for a subtask (`SubtaskCompleted.text`). They
+have no notice: the app reads the output when a subtask becomes `done` or
+the task `completed`.
+
+Events with no effect on the detail (`PlanApproved`, `MessageRefused`,
+`SteeringMessageAdded`, `CallCancelRequested`, a `CallRequested` of the
+kind `subtask` or with no kind) change nothing and give no notice.
 
 ## Read model `chat`
 
@@ -147,7 +201,7 @@ The notice outbox is the kit event store in the same database:
 collections `events`, `counters` and `commands` (the kit names, in place of
 `outbox_views` in ARCHITECTURE 7). The kit relay publishes each notice to
 the subject in its `type`, with `Nats-Msg-Id` = the notice `eventId`. A
-message is a `ViewMessageV1` of contracts v0.3.0:
+message is a `ViewMessageV1` of contracts v0.4.1:
 
 ```
 { eventId, type: "view.tasks", schemaVersion: 1,
@@ -164,14 +218,18 @@ All notices of one source event are in one outbox stream
 documents (a `TaskSubmitted` of the chat gives a `tasks` notice and a
 `conversation:<id>` notice). The data of each notice is the item of its
 topic in `NoticeDataV1`. `commandId` is only on `tasks` notices of
-`TaskSubmitted` and on owner message notices. No `task:<id>` notice yet
-(the task detail read model is M3).
+`TaskSubmitted` (`tasks` and `task:<id>`) and on owner message notices.
+The `task:<id>` notice has the `TaskDetailV1` document, `docId` is the
+`taskId`.
 
 ## Query API (internal)
 
 | Route                                                               | Result                       |
 | ------------------------------------------------------------------- | ---------------------------- |
 | `GET /internal/tasks?limit=&before=&beforeId=`                      | `TaskListResultV1`           |
+| `GET /internal/tasks/:id`                                           | `TaskDetailV1`               |
+| `GET /internal/tasks/:id/output`                                    | `TaskOutputV1` (run result)  |
+| `GET /internal/tasks/:id/subtasks/:sid/output`                      | `TaskOutputV1` (subtask)     |
 | `GET /internal/conversations/:id/messages?limit=&before=&beforeId=` | `ConversationThreadResultV1` |
 | `GET /internal/budget?month=YYYY-MM`                                | `BudgetMonthV1`              |
 | `GET /internal/agents`                                              | `AgentListResultV1`          |
@@ -201,6 +259,12 @@ Thread:
   end. The cursor is the last item that the page has, so the next page
   starts at the first item that did not fit.
 
+Task detail and outputs: 404 `not_found` for an unknown task, a task with
+no result, or a subtask with no output. A bad id gives 400. No `headSeq`:
+the app subscribes `task:<id>` first and drops a notice with a `rev` that
+is not higher than the snapshot (ARCHITECTURE 10.2). An output is at most
+100,000 characters, so it stays below the 1 MiB limit of api-gateway.
+
 Budget: `month` is optional; the default is the current month in
 `OWNER_TIME_ZONE` (the clock of the route, not of the projection). 404
 `not_found` when no cap is set and the month has no document.
@@ -222,7 +286,8 @@ check the durable "projections": num_waiting > 0 ?  -- yes --> refuse, exit 1
 wait about 6 s, check again                          -- yes --> refuse, exit 1
                     (on a refusal, remove the marker if this run wrote it)
 drop the read models (tasks, chat, chat_links, chat_costs, budget_month,
-  budget_cap, agents), events (the notices), counters, processed;
+  budget_cap, agents, task_details, task_outputs), events (the notices),
+  counters, processed;
   make indexes again
 for each source: orchestration, conversation-hub, ai-proxy, budget, agent-manager
   GET <URL>/internal/events?afterPosition=<n>&limit=100, page by page
@@ -297,7 +362,7 @@ The kit and contracts come from git tags (see the kit README for
 `allowScripts`):
 
 ```json
-"@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.3.0",
+"@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.4.1",
 "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#v0.3.0"
 ```
 
@@ -342,6 +407,12 @@ repo. A manual run (`workflow_dispatch`) works only on `main`.
   (`rev` 0) gets the next `BudgetSet` notice only for the month of that
   event. At a month start, the first reserve of the month makes the
   document and its notice.
+- Tasks of an orchestration before v0.4.1 have no `CallSettled`, so
+  their detail shows the cost 0. The chat reply cost comes from the
+  `llm.*` attempts and is correct for them.
+- An open checkpoint stays `open` after `RunCancelled` or `RunFailed`,
+  because no event closes it. The task status tells the app that the run
+  ended.
 - An LLM event of a task that is not in a thread also makes a
   `chat_costs` document. It is small and never shown.
 
