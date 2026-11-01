@@ -55,16 +55,42 @@ export const toItem = (doc: TaskDoc): TaskListItemV1 => ({
   asOf: doc.asOf,
 });
 
-const statusAfter: Partial<Record<RegisteredEvent["type"], TaskStatus>> = {
-  "orchestration.RunStarted": "running",
-  "orchestration.RunBlocked": "blocked",
-  "orchestration.RunCompleted": "completed",
-  "orchestration.RunFailed": "failed",
-};
+export function statusAfter(event: RegisteredEvent): TaskStatus | undefined {
+  switch (event.type) {
+    case "orchestration.TaskSubmitted":
+      return "submitted";
+    case "orchestration.ClarificationRequested":
+      return "clarifying";
+    case "orchestration.ClarificationAnswered":
+      return "planning";
+    case "orchestration.PlanProposed":
+      return event.payload.awaitsApproval ? "awaiting_approval" : "planning";
+    case "orchestration.PlanEdited":
+      return "awaiting_approval";
+    case "orchestration.PlanRejected":
+      return "rejected";
+    case "orchestration.TaskCancelled":
+    case "orchestration.RunCancelled":
+      return "cancelled";
+    case "orchestration.RunStarted":
+    case "orchestration.RunResumed":
+      return "running";
+    case "orchestration.RunPaused":
+      return "paused";
+    case "orchestration.RunBlocked":
+      return "blocked";
+    case "orchestration.RunCompleted":
+      return "completed";
+    case "orchestration.RunFailed":
+      return "failed";
+    default:
+      return undefined;
+  }
+}
 
 export const taskIdOf = (event: RegisteredEvent): string | undefined =>
-  event.type === "orchestration.TaskSubmitted" || statusAfter[event.type] !== undefined
-    ? (event.payload as { taskId: string }).taskId
+  event.type.startsWith("orchestration.")
+    ? (event.payload as { taskId?: string }).taskId
     : undefined;
 
 export function project(current: TaskDoc | null, event: RegisteredEvent): Change | undefined {
@@ -83,7 +109,7 @@ export function project(current: TaskDoc | null, event: RegisteredEvent): Change
       asOf: event.version,
     };
   } else {
-    const status = statusAfter[event.type];
+    const status = statusAfter(event);
     if (!current || status === undefined) return undefined;
     doc = { ...current, status, updatedAt: at, rev, asOf: event.version };
   }

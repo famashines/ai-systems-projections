@@ -6,7 +6,7 @@ import {
   ViewMessageV1,
   type RegisteredEvent,
 } from "@famashines/ai-systems-contracts";
-import { noTitle, project, titleOf, toItem, type TaskDoc } from "./tasks.ts";
+import { noTitle, project, statusAfter, titleOf, toItem, type TaskDoc } from "./tasks.ts";
 
 const taskId = "0b9d3c4e-6f1a-4c2b-9d8e-7a6b5c4d3e2f";
 const commandId = "1c8e2b3d-5a4f-4e6d-8c7b-9a0b1c2d3e4f";
@@ -178,4 +178,63 @@ test("run events set the task status, with no commandId; other events change not
     reason,
   });
   assert.equal(project(first.doc, refused), undefined);
+});
+
+test("the list status follows the status table of contracts v0.4.1", () => {
+  const runId = "3a4b5c6d-7e8f-4a0b-9c1d-2e3f4a5b6c7d";
+  const subtaskId = "4b5c6d7e-8f9a-4b1c-8d2e-3f4a5b6c7d8e";
+  const plan = [
+    {
+      subtaskId,
+      title: "Step",
+      instructions: "Do it",
+      agentId: runId,
+      dependsOn: [],
+      needsApproval: false,
+    },
+  ];
+  const cases: [string, object, string | undefined][] = [
+    ["orchestration.ClarificationRequested", { taskId, questions: ["Which?"] }, "clarifying"],
+    [
+      "orchestration.ClarificationAnswered",
+      { taskId, conversationId: runId, messageId: eventId, text: "This" },
+      "planning",
+    ],
+    [
+      "orchestration.PlanProposed",
+      { taskId, planVersion: 1, subtasks: plan, awaitsApproval: true },
+      "awaiting_approval",
+    ],
+    [
+      "orchestration.PlanProposed",
+      { taskId, planVersion: 1, subtasks: plan, awaitsApproval: false },
+      "planning",
+    ],
+    ["orchestration.PlanEdited", { taskId, planVersion: 2, subtasks: plan }, "awaiting_approval"],
+    ["orchestration.PlanApproved", { taskId, planVersion: 2 }, undefined],
+    ["orchestration.PlanRejected", { taskId, planVersion: 2, reason: "No" }, "rejected"],
+    ["orchestration.TaskCancelled", { taskId }, "cancelled"],
+    ["orchestration.RunStarted", { taskId, runId }, "running"],
+    ["orchestration.RunPaused", { taskId, runId }, "paused"],
+    ["orchestration.RunResumed", { taskId, runId }, "running"],
+    [
+      "orchestration.RunBlocked",
+      { taskId, runId, code: "subtask_failed", reason: "A step failed" },
+      "blocked",
+    ],
+    [
+      "orchestration.SubtaskBlocked",
+      { taskId, runId, subtaskId, code: "forbidden", reason: "No" },
+      undefined,
+    ],
+    ["orchestration.RunCancelled", { taskId, runId }, "cancelled"],
+    ["orchestration.CallCancelRequested", { taskId, callId: runId }, undefined],
+  ];
+  const first = project(null, submitted());
+  assert.ok(first);
+  for (const [index, [type, payload, status]] of cases.entries()) {
+    const event = submitted({ type, payload, version: index + 2 } as Partial<RegisteredEvent>);
+    assert.equal(statusAfter(event), status, type);
+    assert.equal(project(first.doc, event)?.doc.status, status, type);
+  }
 });
