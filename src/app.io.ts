@@ -8,7 +8,9 @@ import {
   listAgents,
   listMessages,
   listTasks,
+  readDetail,
   readMonth,
+  readOutput,
   viewsHeadSeq,
 } from "./projector.io.ts";
 import { routes } from "./query.ts";
@@ -41,6 +43,8 @@ export function startProjections(db: Db, nats: Nats, timeZone: string): Projecti
     routes: routes({
       headSeq: () => viewsHeadSeq(nats),
       tasks: (query) => listTasks(db, query),
+      detail: (taskId) => readDetail(db, taskId),
+      output: (id) => readOutput(db, id),
       messages: (conversationId, query) => listMessages(db, conversationId, query),
       month: (month) => readMonth(db, month),
       agents: () => listAgents(db),

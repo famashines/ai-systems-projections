@@ -34,6 +34,7 @@ import {
 } from "./chat.ts";
 import type { Notice } from "./notices.ts";
 import type { ListQuery } from "./query.ts";
+import { projectDetail, type DetailDoc, type OutputDoc } from "./task-detail.ts";
 import { project, taskIdOf, type TaskDoc } from "./tasks.ts";
 
 export const tasksMigration: Migration = {
@@ -64,6 +65,8 @@ export const readModelCollections = [
   "budget_month",
   "budget_cap",
   "agents",
+  "task_details",
+  "task_outputs",
 ];
 
 export type NoticeStore = EventStore<ViewMessageV1>;
@@ -79,6 +82,8 @@ export const collections = (db: Db) => ({
   months: db.collection<MonthDoc>("budget_month"),
   caps: db.collection<CapDoc>("budget_cap"),
   agents: db.collection<AgentDoc>("agents"),
+  details: db.collection<DetailDoc>("task_details"),
+  outputs: db.collection<OutputDoc>("task_outputs"),
 });
 
 export const tasksOf = (db: Db): Collection<TaskDoc> => collections(db).tasks;
@@ -129,6 +134,8 @@ async function orchestrationPlan(
   const taskId = taskIdOf(event);
   const current = taskId === undefined ? null : await models.tasks.findOne({ _id: taskId });
   const task = taskId === undefined ? undefined : project(current, event);
+  const currentDetail = taskId === undefined ? null : await models.details.findOne({ _id: taskId });
+  const detail = taskId === undefined ? undefined : projectDetail(currentDetail, event);
   const messageId =
     event.type === "orchestration.TaskSubmitted" ? event.payload.messageId : undefined;
   const chat =
@@ -139,12 +146,22 @@ async function orchestrationPlan(
           await models.chat.findOne({ _id: messageId }),
           event,
         );
-  if (!task && !chat) return undefined;
+  if (!task && !detail && !chat) return undefined;
   const linked = chat && chatPlan(models, chat);
   return {
-    notices: [...(task ? [task.notice] : []), ...(linked?.notices ?? [])],
+    notices: [
+      ...(task ? [task.notice] : []),
+      ...(detail ? [detail.notice] : []),
+      ...(linked?.notices ?? []),
+    ],
     writes: async (session) => {
       if (task) await put(models.tasks, { before: current, after: task.doc }, session);
+      if (detail) {
+        await put(models.details, { before: currentDetail, after: detail.doc }, session);
+        for (const output of detail.outputs) {
+          await models.outputs.replaceOne({ _id: output._id }, output, { upsert: true, session });
+        }
+      }
       await linked?.writes(session);
     },
   };
@@ -270,6 +287,12 @@ export async function readMonth(db: Db, month: string): Promise<MonthDoc | null>
   const cap = await caps.findOne({ _id: "month" });
   return cap && emptyMonth(month, cap);
 }
+
+export const readDetail = (db: Db, taskId: string): Promise<DetailDoc | null> =>
+  collections(db).details.findOne({ _id: taskId });
+
+export const readOutput = (db: Db, id: string): Promise<OutputDoc | null> =>
+  collections(db).outputs.findOne({ _id: id });
 
 export const listAgents = (db: Db): Promise<AgentDoc[]> =>
   collections(db).agents.find().sort({ name: 1, _id: 1 }).toArray();

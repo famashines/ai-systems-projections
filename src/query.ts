@@ -4,7 +4,9 @@ import {
   BudgetMonthV1,
   ConversationThreadResultV1,
   Id,
+  TaskDetailV1,
   TaskListResultV1,
+  TaskOutputV1,
   Timestamp,
 } from "@famashines/ai-systems-contracts";
 import { NotFoundError, validate, type Route } from "@famashines/ai-systems-kit/http";
@@ -12,6 +14,7 @@ import { z } from "zod";
 import { toAgent, type AgentDoc } from "./agents.ts";
 import { monthKey, toView, type MonthDoc } from "./budget.ts";
 import { fitPage, toMessage, type MessageDoc } from "./chat.ts";
+import { outputId, toDetail, toOutput, type DetailDoc, type OutputDoc } from "./task-detail.ts";
 import { toItem, type TaskDoc } from "./tasks.ts";
 
 export const ListQuery = z
@@ -27,11 +30,15 @@ export const ListQuery = z
 export type ListQuery = z.infer<typeof ListQuery>;
 
 const ConversationParams = z.object({ id: Id });
+const TaskParams = z.object({ id: Id });
+const SubtaskParams = z.object({ id: Id, sid: Id });
 const MonthQuery = z.object({ month: BudgetMonth.optional() });
 
 export interface Queries {
   headSeq: () => Promise<number>;
   tasks: (query: ListQuery) => Promise<TaskDoc[]>;
+  detail: (taskId: string) => Promise<DetailDoc | null>;
+  output: (id: string) => Promise<OutputDoc | null>;
   messages: (conversationId: string, query: ListQuery) => Promise<MessageDoc[]>;
   month: (month: string) => Promise<MonthDoc | null>;
   agents: () => Promise<AgentDoc[]>;
@@ -48,6 +55,36 @@ export const routes = (queries: Queries): Route[] => [
       const headSeq = await queries.headSeq();
       const docs = await queries.tasks(query);
       return { body: TaskListResultV1.parse({ items: docs.map(toItem), headSeq }) };
+    },
+  },
+  {
+    method: "GET",
+    path: "/internal/tasks/:id",
+    handler: async (request) => {
+      const { params } = await validate(request, { params: TaskParams });
+      const doc = await queries.detail(params.id);
+      if (!doc) throw new NotFoundError("The task does not exist");
+      return { body: TaskDetailV1.parse(toDetail(doc)) };
+    },
+  },
+  {
+    method: "GET",
+    path: "/internal/tasks/:id/output",
+    handler: async (request) => {
+      const { params } = await validate(request, { params: TaskParams });
+      const doc = await queries.output(outputId(params.id));
+      if (!doc) throw new NotFoundError("The task has no result");
+      return { body: TaskOutputV1.parse(toOutput(doc)) };
+    },
+  },
+  {
+    method: "GET",
+    path: "/internal/tasks/:id/subtasks/:sid/output",
+    handler: async (request) => {
+      const { params } = await validate(request, { params: SubtaskParams });
+      const doc = await queries.output(outputId(params.id, params.sid));
+      if (!doc) throw new NotFoundError("The subtask has no output");
+      return { body: TaskOutputV1.parse(toOutput(doc)) };
     },
   },
   {

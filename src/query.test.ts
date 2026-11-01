@@ -5,7 +5,9 @@ import {
   AgentListResultV1,
   BudgetMonthV1,
   ConversationThreadResultV1,
+  TaskDetailV1,
   TaskListResultV1,
+  TaskOutputV1,
 } from "@famashines/ai-systems-contracts";
 import { createService, type Service } from "@famashines/ai-systems-kit/http";
 import { createLogger } from "@famashines/ai-systems-kit/observability";
@@ -13,6 +15,7 @@ import type { AgentDoc } from "./agents.ts";
 import type { MonthDoc } from "./budget.ts";
 import type { MessageDoc } from "./chat.ts";
 import { routes, type ListQuery } from "./query.ts";
+import type { DetailDoc, OutputDoc } from "./task-detail.ts";
 import type { TaskDoc } from "./tasks.ts";
 
 const doc: TaskDoc = {
@@ -49,6 +52,31 @@ const agent: AgentDoc = {
   asOf: 4,
 };
 
+const subtaskId = "4f5a6b7c-8d9e-4f01-9a2b-3c4d5e6f7a8b";
+const detail: DetailDoc = {
+  _id: doc._id,
+  taskId: doc._id,
+  title: "Plan",
+  status: "running",
+  mode: "auto",
+  createdAt: "2026-10-31T09:15:00.000Z",
+  updatedAt: "2026-10-31T09:16:00.000Z",
+  runId: subtaskId,
+  currentCall: null,
+  subtasks: [],
+  checkpoints: [],
+  costMicroUsd: 10,
+  rev: 3,
+  asOf: 3,
+};
+const outputs = new Map<string, OutputDoc>([
+  [doc._id, { _id: doc._id, taskId: doc._id, runId: subtaskId, text: "Result" }],
+  [
+    `${doc._id}:${subtaskId}`,
+    { _id: `${doc._id}:${subtaskId}`, taskId: doc._id, runId: subtaskId, subtaskId, text: "Part" },
+  ],
+]);
+
 const calls: string[] = [];
 const queries: ListQuery[] = [];
 let app: Service;
@@ -68,6 +96,8 @@ before(async () => {
         queries.push(query);
         return Promise.resolve([doc]);
       },
+      detail: (taskId) => Promise.resolve(taskId === detail._id ? detail : null),
+      output: (outputKey) => Promise.resolve(outputs.get(outputKey) ?? null),
       messages: (id, query) => {
         calls.push(`messages ${id}`);
         queries.push(query);
@@ -210,4 +240,39 @@ test("the agent list has headSeq", async () => {
     ],
     headSeq: 7,
   });
+});
+
+test("the task detail and the outputs, 404 when missing, 400 for a bad id", async () => {
+  const response = await fetch(`${base}/internal/tasks/${doc._id}`);
+  assert.equal(response.status, 200);
+  const { _id, ...shown } = detail;
+  assert.equal(_id, doc._id);
+  assert.deepEqual(TaskDetailV1.parse(await response.json()), shown);
+  const result = await fetch(`${base}/internal/tasks/${doc._id}/output`);
+  assert.deepEqual(TaskOutputV1.parse(await result.json()), {
+    taskId: doc._id,
+    runId: subtaskId,
+    text: "Result",
+  });
+  const part = await fetch(`${base}/internal/tasks/${doc._id}/subtasks/${subtaskId}/output`);
+  assert.deepEqual(TaskOutputV1.parse(await part.json()), {
+    taskId: doc._id,
+    runId: subtaskId,
+    subtaskId,
+    text: "Part",
+  });
+  for (const path of [
+    `/internal/tasks/${subtaskId}`,
+    `/internal/tasks/${subtaskId}/output`,
+    `/internal/tasks/${doc._id}/subtasks/${doc._id}/output`,
+  ]) {
+    assert.equal((await fetch(`${base}${path}`)).status, 404, path);
+  }
+  for (const path of [
+    "/internal/tasks/x",
+    "/internal/tasks/x/output",
+    `/internal/tasks/${doc._id}/subtasks/x/output`,
+  ]) {
+    assert.equal((await fetch(`${base}${path}`)).status, 400, path);
+  }
 });

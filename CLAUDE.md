@@ -20,11 +20,12 @@ Rules for all ai-systems repos: `ai-systems-docs/CLAUDE.md`
 
 ```
 src/tasks.ts          project(current, event): the tasks document and its notice (no I/O)
+src/task-detail.ts    projectDetail(current, event): the task detail, its outputs and notice (no I/O)
 src/chat.ts           chat messages, the taskId link, cost per reply, page by bytes (no I/O)
 src/budget.ts         budget month numbers and the cap (no I/O)
 src/agents.ts         agent list documents (no I/O)
 src/notices.ts        the VIEWS notice of a document
-src/query.ts          GET /internal/{tasks,conversations/:id/messages,budget,agents}, with ports
+src/query.ts          GET /internal/{tasks[/:id[/output]],conversations/:id/messages,budget,agents}
 src/config.ts         env schema of the service and the rebuild
 src/projector.io.ts   MongoDB writes in one transaction, notice store, list, headSeq, migrations
 src/rebuild.io.ts     rebuild, its guard and marker, the replay API client
